@@ -1,8 +1,16 @@
 [package]
 name = "clear-notifier"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-zbus = { version = "5", features = ["tokio"] }
+clear-ui = { path = "../clear-ui" }
+winit = "0.30"
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+glyphon = "0.8"
 tokio = { version = "1", features = ["full"] }
+zbus = "5"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
