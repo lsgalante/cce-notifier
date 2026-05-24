@@ -411,10 +411,38 @@ fn play_bell_if_configured() {
     
     if bell_enabled {
         println!("[clear-notifier] Playing notification bell sound...");
-        let _ = std::process::Command::new("pw-play")
+        if let Err(e) = std::process::Command::new("pw-play")
             .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
-            .spawn();
+            .spawn()
+        {
+            eprintln!("[clear-notifier] Failed to spawn pw-play: {}", e);
+        }
     }
+}
+
+fn read_duration_if_configured() -> u64 {
+    let config_path = "/home/lsgalante/.config/clearwm/config.toml";
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[notifications]" {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && in_section {
+            break;
+        }
+        if in_section && trimmed.starts_with("duration") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                if let Ok(d) = val.trim().parse::<u64>() {
+                    return d;
+                }
+            }
+        }
+    }
+    5 // default to 5 seconds
 }
 
 // ── D-Bus Events & AppWrapper ──
@@ -480,10 +508,11 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
                     state.window.request_redraw();
                 }
 
-                // Schedule closing the window in 5 seconds
+                // Schedule closing the window using the configured duration
+                let duration_secs = read_duration_if_configured();
                 let proxy_clone = self.proxy.clone();
                 self.rt_handle.spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(duration_secs)).await;
                     let _ = proxy_clone.send_event(UserEvent::CloseNotification { notification_id: active_id });
                 });
             }
