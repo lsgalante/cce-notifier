@@ -421,10 +421,13 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
 
                 if self.state.is_none() {
                     println!("[clear-notifier] Opening notification window: {} - {}", summary, body);
+                    let size = winit::dpi::LogicalSize::new(360, 100);
                     let mut attributes = WindowAttributes::default()
                         .with_title("Notification")
                         .with_decorations(false)
-                        .with_inner_size(winit::dpi::LogicalSize::new(360, 100));
+                        .with_inner_size(size)
+                        .with_min_inner_size(size)
+                        .with_max_inner_size(size);
                     #[cfg(target_os = "linux")]
                     {
                         attributes = attributes.with_name("clear-notifier", "clear-notifier");
@@ -435,6 +438,7 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
                     state.summary = summary;
                     state.body = body;
                     state.needs_rebuild = true;
+                    state.window.request_redraw();
                     self.state = Some(state);
                 } else if let Some(ref mut state) = self.state {
                     println!("[clear-notifier] Updating active notification window: {} - {}", summary, body);
@@ -470,6 +474,7 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
                 }
                 WindowEvent::Resized(s) => {
                     state.resize(s);
+                    state.window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
                     state.render();
