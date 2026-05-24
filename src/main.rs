@@ -387,6 +387,36 @@ impl NotificationApp {
     }
 }
 
+fn play_bell_if_configured() {
+    let config_path = "/home/lsgalante/.config/clearwm/config.toml";
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    
+    let mut in_section = false;
+    let mut bell_enabled = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[notifications]" {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && in_section {
+            break;
+        }
+        if in_section && trimmed.starts_with("bell") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                bell_enabled = val.trim() == "true";
+            }
+        }
+    }
+    
+    if bell_enabled {
+        println!("[clear-notifier] Playing notification bell sound...");
+        let _ = std::process::Command::new("pw-play")
+            .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
+            .spawn();
+    }
+}
+
 // ── D-Bus Events & AppWrapper ──
 
 #[derive(Debug, Clone)]
@@ -416,6 +446,7 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::NewNotification { app_name, summary, body } => {
+                play_bell_if_configured();
                 self.current_id += 1;
                 let active_id = self.current_id;
 
