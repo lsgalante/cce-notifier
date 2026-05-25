@@ -1,17 +1,38 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowAttributes};
-#[cfg(target_os = "linux")]
-use winit::platform::wayland::WindowAttributesExtWayland;
 use zbus::{interface, connection};
 use zbus::zvariant::Value;
 use glyphon::{
     Attrs, Buffer, Cache, FontSystem, Metrics, Resolution, SwashCache, TextArea, TextAtlas,
     TextBounds, TextRenderer, Viewport,
 };
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_keyboard, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window, delegate_output,
+    registry::{ProvidesRegistryState, RegistryState},
+    output::{OutputHandler, OutputState},
+    seat::{
+        keyboard::KeyboardHandler,
+        pointer::PointerHandler,
+        Capability, SeatHandler, SeatState,
+    },
+    shell::{
+        xdg::{
+            window::{Window as XdgWindow, WindowConfigure, WindowHandler, WindowDecorations},
+            XdgShell,
+        },
+        WaylandSurface,
+    },
+    shm::{Shm, ShmHandler},
+};
+use wayland_client::{
+    globals::registry_queue_init,
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    Connection, QueueHandle, Proxy,
+};
+use calloop::EventLoop;
+use calloop_wayland_source::WaylandSource;
 
 // ── Vertices and rendering structures ──
 
@@ -78,8 +99,9 @@ struct TextItem {
 // ── NotificationApp ──
 
 struct NotificationApp {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    window: XdgWindow,
+    surface: wl_surface::WlSurface,
+    wgpu_surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -107,16 +129,35 @@ struct NotificationApp {
 }
 
 impl NotificationApp {
-    async fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
+    async fn new(
+        conn: &Connection,
+        qh: &QueueHandle<AppState>,
+        compositor_state: &CompositorState,
+        xdg_shell_state: &XdgShell,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let surface = compositor_state.create_surface(qh);
+        let window = xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, qh);
+        window.set_title("Notification");
+        window.set_app_id("clear-notifier");
+        window.set_min_size(Some((width, height)));
+        window.set_max_size(Some((width, height)));
+        window.commit();
+
+        let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
+            display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
+            surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
+        }));
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
-        let surface = instance.create_surface(window.clone()).expect("surface");
+        let wgpu_surface = instance.create_surface(wayland_handle).expect("surface");
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
+            compatible_surface: Some(&wgpu_surface),
             force_fallback_adapter: false,
         }).await.expect("adapter");
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
@@ -125,8 +166,8 @@ impl NotificationApp {
             required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
         }, None).await.expect("device");
-        let config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("config");
-        surface.configure(&device, &config);
+        let config = wgpu_surface.get_default_config(&adapter, width.max(1), height.max(1)).expect("config");
+        wgpu_surface.configure(&device, &config);
 
         let shader_code = clear_ui::SHADER;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -178,7 +219,7 @@ impl NotificationApp {
         let mut text_atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
         let mut text_viewport = Viewport::new(&device, &cache);
-        text_viewport.update(&queue, Resolution { width: size.width, height: size.height });
+        text_viewport.update(&queue, Resolution { width, height });
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
@@ -187,11 +228,12 @@ impl NotificationApp {
             mapped_at_creation: false,
         });
 
-        let scale_factor = (window.scale_factor() as f32).max(2.0) as f64;
+        let scale_factor = 2.0;
 
         Self {
             window,
             surface,
+            wgpu_surface,
             device,
             queue,
             config,
@@ -206,8 +248,8 @@ impl NotificationApp {
             rects: Vec::new(),
             text_items: Vec::new(),
             scale_factor,
-            width: size.width,
-            height: size.height,
+            width,
+            height,
             needs_rebuild: true,
             app_name: String::new(),
             summary: String::new(),
@@ -325,13 +367,13 @@ impl NotificationApp {
         ).unwrap();
     }
 
-    fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        if size.width > 0 && size.height > 0 {
-            self.width = size.width;
-            self.height = size.height;
-            self.config.width = size.width;
-            self.config.height = size.height;
-            self.surface.configure(&self.device, &self.config);
+    fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.width = width;
+            self.height = height;
+            self.config.width = width;
+            self.config.height = height;
+            self.wgpu_surface.configure(&self.device, &self.config);
             self.needs_rebuild = true;
         }
     }
@@ -343,10 +385,10 @@ impl NotificationApp {
         }
         self.prepare_text();
 
-        let output = match self.surface.get_current_texture() {
+        let output = match self.wgpu_surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
+                self.wgpu_surface.configure(&self.device, &self.config);
                 return;
             }
             Err(wgpu::SurfaceError::Timeout) => return,
@@ -382,7 +424,6 @@ impl NotificationApp {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.window.pre_present_notify();
         output.present();
     }
 }
@@ -445,7 +486,7 @@ fn read_duration_if_configured() -> u64 {
     5 // default to 5 seconds
 }
 
-// ── D-Bus Events & AppWrapper ──
+// ── D-Bus Events & AppState ──
 
 #[derive(Debug, Clone)]
 enum UserEvent {
@@ -459,19 +500,260 @@ enum UserEvent {
     },
 }
 
-struct AppWrapper {
-    proxy: EventLoopProxy<UserEvent>,
-    rt_handle: tokio::runtime::Handle,
+struct AppState {
+    registry_state: RegistryState,
+    compositor_state: CompositorState,
+    xdg_shell_state: XdgShell,
+    shm_state: Shm,
+    seat_state: SeatState,
+    output_state: OutputState,
+
+    seats: Vec<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+
     state: Option<NotificationApp>,
     current_id: u32,
+    exit: bool,
+    redraw: bool,
+
+    conn: Connection,
+    qh: QueueHandle<AppState>,
+    rt_handle: tokio::runtime::Handle,
+    sender: calloop::channel::Sender<UserEvent>,
 }
 
-impl ApplicationHandler<UserEvent> for AppWrapper {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // We run in background, do not open windows until a notification event arrives
+impl CompositorHandler for AppState {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        scale_factor: i32,
+    ) {
+        if let Some(state) = &mut self.state {
+            state.scale_factor = (scale_factor as f32).max(2.0) as f64;
+            state.resize(state.width, state.height);
+        }
+        self.redraw = true;
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {}
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {}
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {}
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {}
+}
+
+impl OutputHandler for AppState {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
+    fn update_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: wl_output::WlOutput) {}
+}
+
+impl SeatHandler for AppState {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.seats.push(seat);
+    }
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            let pointer = self.seat_state.get_pointer(qh, &seat).unwrap();
+            self.pointer = Some(pointer);
+        }
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            let keyboard = self.seat_state.get_keyboard(qh, &seat, None).unwrap();
+            self.keyboard = Some(keyboard);
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            self.pointer = None;
+        }
+        if capability == Capability::Keyboard {
+            self.keyboard = None;
+        }
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.seats.retain(|s| s != &seat);
+    }
+}
+
+impl ShmHandler for AppState {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm_state
+    }
+}
+
+impl PointerHandler for AppState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        _events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
+    ) {}
+}
+
+impl KeyboardHandler for AppState {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw_modifiers: &[u32],
+        _keysyms: &[xkeysym::Keysym],
+    ) {}
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {}
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {}
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {}
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
+        _layout: u32,
+    ) {}
+}
+
+impl WindowHandler for AppState {
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _window: &XdgWindow,
+        configure: WindowConfigure,
+        _serial: u32,
+    ) {
+        let (w, h) = configure.new_size;
+        if let (Some(w), Some(h)) = (w, h) {
+            let width = w.get();
+            let height = h.get();
+            if let Some(state) = &mut self.state {
+                state.resize(width, height);
+            }
+        }
+        self.redraw = true;
+    }
+
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &XdgWindow) {
+        self.state = None;
+        self.redraw = true;
+    }
+}
+
+impl ProvidesRegistryState for AppState {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    
+    fn runtime_add_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+        _version: u32,
+    ) {}
+    
+    fn runtime_remove_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+    ) {}
+}
+
+delegate_compositor!(AppState);
+delegate_xdg_shell!(AppState);
+delegate_xdg_window!(AppState);
+delegate_shm!(AppState);
+delegate_seat!(AppState);
+delegate_pointer!(AppState);
+delegate_keyboard!(AppState);
+delegate_registry!(AppState);
+delegate_output!(AppState);
+
+impl AppState {
+    fn handle_user_event(&mut self, event: UserEvent) {
         match event {
             UserEvent::NewNotification { app_name, summary, body } => {
                 play_bell_if_configured();
@@ -480,24 +762,18 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
 
                 if self.state.is_none() {
                     println!("[clear-notifier] Opening notification window: {} - {}", summary, body);
-                    let size = winit::dpi::LogicalSize::new(360, 100);
-                    let mut attributes = WindowAttributes::default()
-                        .with_title("Notification")
-                        .with_decorations(false)
-                        .with_inner_size(size)
-                        .with_min_inner_size(size)
-                        .with_max_inner_size(size);
-                    #[cfg(target_os = "linux")]
-                    {
-                        attributes = attributes.with_name("clear-notifier", "clear-notifier");
-                    }
-                    let window = Arc::new(event_loop.create_window(attributes).unwrap());
-                    let mut state = pollster::block_on(NotificationApp::new(window));
+                    let mut state = pollster::block_on(NotificationApp::new(
+                        &self.conn,
+                        &self.qh,
+                        &self.compositor_state,
+                        &self.xdg_shell_state,
+                        360,
+                        100,
+                    ));
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
                     state.needs_rebuild = true;
-                    state.window.request_redraw();
                     self.state = Some(state);
                 } else if let Some(ref mut state) = self.state {
                     println!("[clear-notifier] Updating active notification window: {} - {}", summary, body);
@@ -505,41 +781,23 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
                     state.summary = summary;
                     state.body = body;
                     state.needs_rebuild = true;
-                    state.window.request_redraw();
                 }
+                self.redraw = true;
 
                 // Schedule closing the window using the configured duration
                 let duration_secs = read_duration_if_configured();
-                let proxy_clone = self.proxy.clone();
+                let sender_clone = self.sender.clone();
                 self.rt_handle.spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(duration_secs)).await;
-                    let _ = proxy_clone.send_event(UserEvent::CloseNotification { notification_id: active_id });
+                    let _ = sender_clone.send(UserEvent::CloseNotification { notification_id: active_id });
                 });
             }
             UserEvent::CloseNotification { notification_id } => {
-                // Only close the window if no newer notification has taken over
                 if notification_id == self.current_id {
                     println!("[clear-notifier] Closing notification window (ID: {})...", notification_id);
                     self.state = None; // Dropping the window and resources
+                    self.redraw = true;
                 }
-            }
-        }
-    }
-
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: winit::window::WindowId, event: WindowEvent) {
-        if let Some(ref mut state) = self.state {
-            match event {
-                WindowEvent::CloseRequested => {
-                    self.state = None;
-                }
-                WindowEvent::Resized(s) => {
-                    state.resize(s);
-                    state.window.request_redraw();
-                }
-                WindowEvent::RedrawRequested => {
-                    state.render();
-                }
-                _ => {}
             }
         }
     }
@@ -548,7 +806,7 @@ impl ApplicationHandler<UserEvent> for AppWrapper {
 // ── D-Bus zbus implementation ──
 
 struct DbusInterface {
-    proxy: EventLoopProxy<UserEvent>,
+    sender: calloop::channel::Sender<UserEvent>,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -572,7 +830,7 @@ impl DbusInterface {
         _hints: HashMap<String, Value<'_>>,
         _expire_timeout: i32,
     ) -> u32 {
-        let _ = self.proxy.send_event(UserEvent::NewNotification {
+        let _ = self.sender.send(UserEvent::NewNotification {
             app_name,
             summary,
             body,
@@ -596,9 +854,15 @@ impl DbusInterface {
 // ── main ──
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create the winit event loop
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-    let proxy = event_loop.create_proxy();
+    let conn = Connection::connect_to_env().unwrap();
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let qh = event_queue.handle();
+
+    let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
+    let xdg_shell_state = XdgShell::bind(&globals, &qh).unwrap();
+    let shm_state = Shm::bind(&globals, &qh).unwrap();
+    let seat_state = SeatState::new(&globals, &qh);
+    let output_state = OutputState::new(&globals, &qh);
 
     // Create the tokio runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -607,10 +871,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     let handle = rt.handle().clone();
 
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let loop_handle = event_loop.handle();
+
+    let (sender, channel) = calloop::channel::channel::<UserEvent>();
+
     // Start D-Bus listener inside a background tokio thread pool
+    let sender_clone = sender.clone();
     std::thread::spawn(move || {
         rt.block_on(async {
-            let dbus_impl = DbusInterface { proxy };
+            let dbus_impl = DbusInterface { sender: sender_clone };
             let _connection = connection::Builder::session()
                 .expect("Failed to connect to session bus")
                 .name("org.freedesktop.Notifications")
@@ -630,15 +900,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
-    let mut app = AppWrapper {
-        proxy: event_loop.create_proxy(),
-        rt_handle: handle,
+    let mut app = AppState {
+        registry_state: RegistryState::new(&globals),
+        compositor_state,
+        xdg_shell_state,
+        shm_state,
+        seat_state,
+        output_state,
+        seats: Vec::new(),
+        pointer: None,
+        keyboard: None,
         state: None,
         current_id: 0,
+        exit: false,
+        redraw: true,
+        conn: conn.clone(),
+        qh,
+        rt_handle: handle,
+        sender,
     };
 
-    println!("[clear-notifier] winit event loop starting...");
-    event_loop.run_app(&mut app)?;
+    WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
+
+    loop_handle.insert_source(channel, |event, _metadata, app_state: &mut AppState| {
+        if let calloop::channel::Event::Msg(msg) = event {
+            app_state.handle_user_event(msg);
+        }
+    }).unwrap();
+
+    println!("[clear-notifier] Wayland event loop starting...");
+    loop {
+        event_loop
+            .dispatch(std::time::Duration::from_millis(16), &mut app)
+            .unwrap();
+        if app.exit {
+            break;
+        }
+        if app.redraw {
+            app.redraw = false;
+            if let Some(state) = &mut app.state {
+                state.render();
+            }
+        }
+    }
 
     Ok(())
 }

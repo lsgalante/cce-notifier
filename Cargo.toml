@@ -5,7 +5,12 @@ edition = "2021"
 
 [dependencies]
 clear-ui = { path = "../clear-ui" }
-winit = "0.30"
+smithay-client-toolkit = "0.19.2"
+calloop = "0.13.0"
+calloop-wayland-source = "0.3.0"
+wayland-client = { version = "0.31", features = ["system"] }
+xkeysym = "0.2"
+raw-window-handle = "0.6"
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
