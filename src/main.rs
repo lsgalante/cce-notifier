@@ -98,6 +98,15 @@ struct TextItem {
 
 // ── NotificationApp ──
 
+struct RendererResources {
+    render_pipeline: wgpu::RenderPipeline,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    text_atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    cache: Cache,
+}
+
 struct NotificationApp {
     window: XdgWindow,
     surface: wl_surface::WlSurface,
@@ -105,14 +114,9 @@ struct NotificationApp {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
 
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    text_atlas: TextAtlas,
-    text_renderer: TextRenderer,
     text_viewport: Viewport,
 
     rects: Vec<RectWidget>,
@@ -122,6 +126,7 @@ struct NotificationApp {
     width: u32,
     height: u32,
     needs_rebuild: bool,
+    configured: bool,
 
     app_name: String,
     summary: String,
@@ -129,20 +134,27 @@ struct NotificationApp {
 }
 
 impl NotificationApp {
-    async fn new(
+    fn new(
         conn: &Connection,
         qh: &QueueHandle<AppState>,
         compositor_state: &CompositorState,
         xdg_shell_state: &XdgShell,
         width: u32,
         height: u32,
+        scale: f64,
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        cache: &Cache,
     ) -> Self {
         let surface = compositor_state.create_surface(qh);
+        surface.set_buffer_scale(scale as i32);
         let window = xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, qh);
         window.set_title("Notification");
-        window.set_app_id("clear-notifier");
-        window.set_min_size(Some((width, height)));
-        window.set_max_size(Some((width, height)));
+        window.set_app_id("clear-notification-daemon");
+        window.set_min_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
+        window.set_max_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
         window.commit();
 
         let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
@@ -150,75 +162,12 @@ impl NotificationApp {
             surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
         }));
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
         let wgpu_surface = instance.create_surface(wayland_handle).expect("surface");
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&wgpu_surface),
-            force_fallback_adapter: false,
-        }).await.expect("adapter");
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("GPU Device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-        }, None).await.expect("device");
-        let config = wgpu_surface.get_default_config(&adapter, width.max(1), height.max(1)).expect("config");
+        let mut config = wgpu_surface.get_default_config(adapter, width.max(1), height.max(1)).expect("config");
+        config.format = wgpu::TextureFormat::Bgra8Unorm;
         wgpu_surface.configure(&device, &config);
 
-        let shader_code = clear_ui::SHADER;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader_code)),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-                strip_index_format: None,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
-            multiview: None,
-            cache: None,
-        });
-
-        let font_system = FontSystem::new();
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let mut text_atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
-        let mut text_viewport = Viewport::new(&device, &cache);
+        let mut text_viewport = Viewport::new(&device, cache);
         text_viewport.update(&queue, Resolution { width, height });
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -228,7 +177,7 @@ impl NotificationApp {
             mapped_at_creation: false,
         });
 
-        let scale_factor = 2.0;
+        let scale_factor = scale;
 
         Self {
             window,
@@ -237,13 +186,8 @@ impl NotificationApp {
             device,
             queue,
             config,
-            render_pipeline,
             vertex_buffer,
             vertex_count: 0,
-            font_system,
-            swash_cache,
-            text_atlas,
-            text_renderer,
             text_viewport,
             rects: Vec::new(),
             text_items: Vec::new(),
@@ -251,13 +195,14 @@ impl NotificationApp {
             width,
             height,
             needs_rebuild: true,
+            configured: false,
             app_name: String::new(),
             summary: String::new(),
             body: String::new(),
         }
     }
 
-    fn rebuild_layout(&mut self) {
+    fn rebuild_layout(&mut self, font_system: &mut FontSystem) {
         let sw = self.width as f32;
         let sh = self.height as f32;
         let s = self.scale_factor as f32;
@@ -284,7 +229,7 @@ impl NotificationApp {
         });
 
         // 3. Text content
-        let app_name_buf = make_text_buffer(&mut self.font_system, &self.app_name, 10.0 * s);
+        let app_name_buf = make_text_buffer(font_system, &self.app_name, 10.0 * s);
         self.text_items.push(TextItem {
             buffer: app_name_buf,
             x: 18.0 * s,
@@ -296,7 +241,7 @@ impl NotificationApp {
             ),
         });
 
-        let summary_buf = make_text_buffer(&mut self.font_system, &self.summary, 13.0 * s);
+        let summary_buf = make_text_buffer(font_system, &self.summary, 13.0 * s);
         self.text_items.push(TextItem {
             buffer: summary_buf,
             x: 18.0 * s,
@@ -308,7 +253,7 @@ impl NotificationApp {
             ),
         });
 
-        let body_buf = make_text_buffer(&mut self.font_system, &self.body, 11.0 * s);
+        let body_buf = make_text_buffer(font_system, &self.body, 11.0 * s);
         self.text_items.push(TextItem {
             buffer: body_buf,
             x: 18.0 * s,
@@ -349,7 +294,13 @@ impl NotificationApp {
         self.queue.write_buffer(&self.vertex_buffer, 0, data);
     }
 
-    fn prepare_text(&mut self) {
+    fn prepare_text(
+        &mut self,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        text_atlas: &mut TextAtlas,
+        text_renderer: &mut TextRenderer,
+    ) {
         let w = self.width as f32;
         let h = self.height as f32;
         let viewport = Resolution { width: w as u32, height: h as u32 };
@@ -361,9 +312,9 @@ impl NotificationApp {
             default_color: ti.color,
             custom_glyphs: &[],
         }).collect();
-        self.text_renderer.prepare(
-            &self.device, &self.queue, &mut self.font_system,
-            &mut self.text_atlas, &self.text_viewport, areas, &mut self.swash_cache
+        text_renderer.prepare(
+            &self.device, &self.queue, font_system,
+            text_atlas, &self.text_viewport, areas, swash_cache
         ).unwrap();
     }
 
@@ -378,12 +329,19 @@ impl NotificationApp {
         }
     }
 
-    fn render(&mut self) {
+    fn render(
+        &mut self,
+        render_pipeline: &wgpu::RenderPipeline,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        text_atlas: &mut TextAtlas,
+        text_renderer: &mut TextRenderer,
+    ) {
         if self.needs_rebuild {
-            self.rebuild_layout();
+            self.rebuild_layout(font_system);
             self.upload_vertices();
         }
-        self.prepare_text();
+        self.prepare_text(font_system, swash_cache, text_atlas, text_renderer);
 
         let output = match self.wgpu_surface.get_current_texture() {
             Ok(t) => t,
@@ -416,11 +374,11 @@ impl NotificationApp {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(&self.render_pipeline);
+            pass.set_pipeline(render_pipeline);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.draw(0..self.vertex_count, 0..1);
 
-            self.text_renderer.render(&self.text_atlas, &self.text_viewport, &mut pass).unwrap();
+            text_renderer.render(text_atlas, &self.text_viewport, &mut pass).unwrap();
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -451,12 +409,12 @@ fn play_bell_if_configured() {
     }
     
     if bell_enabled {
-        println!("[clear-notifier] Playing notification bell sound...");
+        println!("[clear-notification-daemon] Playing notification bell sound...");
         if let Err(e) = std::process::Command::new("pw-play")
             .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
             .spawn()
         {
-            eprintln!("[clear-notifier] Failed to spawn pw-play: {}", e);
+            eprintln!("[clear-notification-daemon] Failed to spawn pw-play: {}", e);
         }
     }
 }
@@ -521,6 +479,12 @@ struct AppState {
     qh: QueueHandle<AppState>,
     rt_handle: tokio::runtime::Handle,
     sender: calloop::channel::Sender<UserEvent>,
+
+    wgpu_instance: wgpu::Instance,
+    wgpu_adapter: wgpu::Adapter,
+    wgpu_device: wgpu::Device,
+    wgpu_queue: wgpu::Queue,
+    renderer_resources: RendererResources,
 }
 
 impl CompositorHandler for AppState {
@@ -531,9 +495,15 @@ impl CompositorHandler for AppState {
         _surface: &wl_surface::WlSurface,
         scale_factor: i32,
     ) {
+        _surface.set_buffer_scale(scale_factor);
         if let Some(state) = &mut self.state {
-            state.scale_factor = (scale_factor as f32).max(2.0) as f64;
-            state.resize(state.width, state.height);
+            let old_scale = state.scale_factor;
+            state.scale_factor = scale_factor as f64;
+            let logical_w = state.width as f64 / old_scale;
+            let logical_h = state.height as f64 / old_scale;
+            let pw = (logical_w * state.scale_factor) as u32;
+            let ph = (logical_h * state.scale_factor) as u32;
+            state.resize(pw, ph);
         }
         self.redraw = true;
     }
@@ -707,7 +677,10 @@ impl WindowHandler for AppState {
             let width = w.get();
             let height = h.get();
             if let Some(state) = &mut self.state {
-                state.resize(width, height);
+                state.configured = true;
+                let pw = (width as f64 * state.scale_factor) as u32;
+                let ph = (height as f64 * state.scale_factor) as u32;
+                state.resize(pw, ph);
             }
         }
         self.redraw = true;
@@ -761,22 +734,31 @@ impl AppState {
                 let active_id = self.current_id;
 
                 if self.state.is_none() {
-                    println!("[clear-notifier] Opening notification window: {} - {}", summary, body);
-                    let mut state = pollster::block_on(NotificationApp::new(
+                    println!("[clear-notification-daemon] Opening notification window: {} - {}", summary, body);
+                    let scale = clear_ui::wayland::detect_scale_factor(&self.output_state);
+                    let pw = (360.0 * scale) as u32;
+                    let ph = (100.0 * scale) as u32;
+                    let mut state = NotificationApp::new(
                         &self.conn,
                         &self.qh,
                         &self.compositor_state,
                         &self.xdg_shell_state,
-                        360,
-                        100,
-                    ));
+                        pw,
+                        ph,
+                        scale,
+                        &self.wgpu_instance,
+                        &self.wgpu_adapter,
+                        self.wgpu_device.clone(),
+                        self.wgpu_queue.clone(),
+                        &self.renderer_resources.cache,
+                    );
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
                     state.needs_rebuild = true;
                     self.state = Some(state);
                 } else if let Some(ref mut state) = self.state {
-                    println!("[clear-notifier] Updating active notification window: {} - {}", summary, body);
+                    println!("[clear-notification-daemon] Updating active notification window: {} - {}", summary, body);
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
@@ -794,7 +776,7 @@ impl AppState {
             }
             UserEvent::CloseNotification { notification_id } => {
                 if notification_id == self.current_id {
-                    println!("[clear-notifier] Closing notification window (ID: {})...", notification_id);
+                    println!("[clear-notification-daemon] Closing notification window (ID: {})...", notification_id);
                     self.state = None; // Dropping the window and resources
                     self.redraw = true;
                 }
@@ -843,7 +825,7 @@ impl DbusInterface {
 
     async fn get_server_information(&self) -> (String, String, String, String) {
         (
-            "clear-notifier".to_string(),
+            "clear-notification-daemon".to_string(),
             "ClearWM Project".to_string(),
             "0.1.0".to_string(),
             "1.2".to_string(),
@@ -863,6 +845,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shm_state = Shm::bind(&globals, &qh).unwrap();
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
+
+    // Initialize wgpu graphics context once on startup
+    let wgpu_instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    let wgpu_adapter = pollster::block_on(wgpu_instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    })).expect("Failed to find wgpu adapter");
+    let (wgpu_device, wgpu_queue) = pollster::block_on(wgpu_adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("GPU Device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(wgpu_adapter.limits()),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+    }, None)).expect("Failed to request wgpu device");
+
+    // Initialize renderer resources once
+    let font_system = FontSystem::new();
+    let swash_cache = SwashCache::new();
+    let cache = Cache::new(&wgpu_device);
+    let mut text_atlas = TextAtlas::new(&wgpu_device, &wgpu_queue, &cache, wgpu::TextureFormat::Bgra8Unorm);
+    let text_renderer = TextRenderer::new(&mut text_atlas, &wgpu_device, wgpu::MultisampleState::default(), None);
+
+    let shader_code = clear_ui::SHADER;
+    let shader = wgpu_device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Shader"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader_code)),
+    });
+    let pipeline_layout = wgpu_device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pipeline Layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+    let render_pipeline = wgpu_device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Render Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Vertex::desc()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+            strip_index_format: None,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    });
+
+    let renderer_resources = RendererResources {
+        render_pipeline,
+        font_system,
+        swash_cache,
+        text_atlas,
+        text_renderer,
+        cache,
+    };
 
     // Create the tokio runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -891,7 +950,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .expect("Failed to build D-Bus connection");
 
-            println!("[clear-notifier] D-Bus listener registered. Running...");
+            println!("[clear-notification-daemon] D-Bus listener registered. Running...");
             
             // Keep background runtime alive
             loop {
@@ -918,6 +977,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         qh,
         rt_handle: handle,
         sender,
+        wgpu_instance,
+        wgpu_adapter,
+        wgpu_device: wgpu_device.clone(),
+        wgpu_queue: wgpu_queue.clone(),
+        renderer_resources,
     };
 
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
@@ -928,7 +992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }).unwrap();
 
-    println!("[clear-notifier] Wayland event loop starting...");
+    println!("[clear-notification-daemon] Wayland event loop starting...");
     loop {
         event_loop
             .dispatch(std::time::Duration::from_millis(16), &mut app)
@@ -939,7 +1003,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if app.redraw {
             app.redraw = false;
             if let Some(state) = &mut app.state {
-                state.render();
+                if state.configured {
+                    let rr = &mut app.renderer_resources;
+                    state.render(
+                        &rr.render_pipeline,
+                        &mut rr.font_system,
+                        &mut rr.swash_cache,
+                        &mut rr.text_atlas,
+                        &mut rr.text_renderer,
+                    );
+                }
             }
         }
     }
