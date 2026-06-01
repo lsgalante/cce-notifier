@@ -127,6 +127,7 @@ struct NotificationApp {
     height: u32,
     needs_rebuild: bool,
     configured: bool,
+    opacity: f32,
 
     app_name: String,
     summary: String,
@@ -147,6 +148,7 @@ impl NotificationApp {
         device: wgpu::Device,
         queue: wgpu::Queue,
         cache: &Cache,
+        opacity: f32,
     ) -> Self {
         let surface = compositor_state.create_surface(qh);
         surface.set_buffer_scale(scale as i32);
@@ -165,6 +167,16 @@ impl NotificationApp {
         let wgpu_surface = instance.create_surface(wayland_handle).expect("surface");
         let mut config = wgpu_surface.get_default_config(adapter, width.max(1), height.max(1)).expect("config");
         config.format = wgpu::TextureFormat::Bgra8Unorm;
+        
+        let capabilities = wgpu_surface.get_capabilities(adapter);
+        let alpha_mode = if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+            wgpu::CompositeAlphaMode::PostMultiplied
+        } else {
+            capabilities.alpha_modes[0]
+        };
+        config.alpha_mode = alpha_mode;
         wgpu_surface.configure(&device, &config);
 
         let mut text_viewport = Viewport::new(&device, cache);
@@ -196,6 +208,7 @@ impl NotificationApp {
             height,
             needs_rebuild: true,
             configured: false,
+            opacity,
             app_name: String::new(),
             summary: String::new(),
             body: String::new(),
@@ -216,7 +229,12 @@ impl NotificationApp {
             y: 0.0,
             w: sw,
             h: sh,
-            color: clear_ui::colors::HEADER_BG,
+            color: [
+                clear_ui::colors::HEADER_BG[0],
+                clear_ui::colors::HEADER_BG[1],
+                clear_ui::colors::HEADER_BG[2],
+                self.opacity,
+            ],
         });
 
         // 2. Bright Green Left accent border
@@ -365,7 +383,7 @@ impl NotificationApp {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.12, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -387,7 +405,7 @@ impl NotificationApp {
 }
 
 fn play_bell_if_configured() {
-    let config_path = "/home/lsgalante/.config/clearwm/config.toml";
+    let config_path = "/home/lsgalante/.config/ccec/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -420,7 +438,7 @@ fn play_bell_if_configured() {
 }
 
 fn read_duration_if_configured() -> u64 {
-    let config_path = "/home/lsgalante/.config/clearwm/config.toml";
+    let config_path = "/home/lsgalante/.config/ccec/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -442,6 +460,31 @@ fn read_duration_if_configured() -> u64 {
         }
     }
     5 // default to 5 seconds
+}
+
+fn read_opacity_if_configured() -> f32 {
+    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[transparency]" {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && in_section {
+            break;
+        }
+        if in_section && trimmed.starts_with("opacity") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                if let Ok(o) = val.trim().parse::<f32>() {
+                    return o.clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+    0.9 // default opacity
 }
 
 // ── D-Bus Events & AppState ──
@@ -732,6 +775,7 @@ impl AppState {
                 play_bell_if_configured();
                 self.current_id += 1;
                 let active_id = self.current_id;
+                let opacity = read_opacity_if_configured();
 
                 if self.state.is_none() {
                     println!("[clear-notification-daemon] Opening notification window: {} - {}", summary, body);
@@ -751,6 +795,7 @@ impl AppState {
                         self.wgpu_device.clone(),
                         self.wgpu_queue.clone(),
                         &self.renderer_resources.cache,
+                        opacity,
                     );
                     state.app_name = app_name;
                     state.summary = summary;
@@ -762,6 +807,7 @@ impl AppState {
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
+                    state.opacity = opacity;
                     state.needs_rebuild = true;
                 }
                 self.redraw = true;
@@ -826,7 +872,7 @@ impl DbusInterface {
     async fn get_server_information(&self) -> (String, String, String, String) {
         (
             "clear-notification-daemon".to_string(),
-            "ClearWM Project".to_string(),
+            "CCEC Project".to_string(),
             "0.1.0".to_string(),
             "1.2".to_string(),
         )
@@ -852,7 +898,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     });
     let wgpu_adapter = pollster::block_on(wgpu_instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: false,
     })).expect("Failed to find wgpu adapter");
