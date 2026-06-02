@@ -1040,9 +1040,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[clear-notification-daemon] Wayland event loop starting...");
     loop {
-        event_loop
-            .dispatch(std::time::Duration::from_millis(16), &mut app)
-            .unwrap();
+        if let Err(err) = event_loop.dispatch(std::time::Duration::from_millis(16), &mut app) {
+            eprintln!("[clear-notification-daemon] Event loop error (exiting): {:?}", err);
+            break;
+        }
         if app.exit {
             break;
         }

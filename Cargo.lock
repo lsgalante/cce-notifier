@@ -351,6 +351,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "glyphon",
+ "libc",
  "pollster",
  "raw-window-handle",
  "resvg",
