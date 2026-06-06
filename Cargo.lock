@@ -356,6 +356,7 @@ dependencies = [
  "raw-window-handle",
  "resvg",
  "serde",
+ "serde_json",
  "smithay-client-toolkit",
  "tokio",
  "wayland-backend",
