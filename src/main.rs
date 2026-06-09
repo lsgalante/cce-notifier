@@ -156,7 +156,7 @@ impl NotificationApp {
         surface.set_buffer_scale(scale as i32);
         let window = xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, qh);
         window.set_title("Notification");
-        window.set_app_id("clear-notification-daemon");
+        window.set_app_id("cce-notification-daemon");
         window.set_min_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
         window.set_max_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
         window.commit();
@@ -328,7 +328,7 @@ impl NotificationApp {
         let bounds = TextBounds { left: 0, top: 0, right: w as i32, bottom: h as i32 };
         let areas: Vec<TextArea> = self.text_items.iter().map(|ti| TextArea {
             buffer: &ti.buffer,
-            left: ti.x, top: ti.y, scale: 1.0, bounds,
+            left: ti.x.round(), top: ti.y.round(), scale: 1.0, bounds,
             default_color: ti.color,
             custom_glyphs: &[],
         }).collect();
@@ -407,7 +407,7 @@ impl NotificationApp {
 }
 
 fn play_bell_if_configured() {
-    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -429,18 +429,18 @@ fn play_bell_if_configured() {
     }
     
     if bell_enabled {
-        println!("[clear-notification-daemon] Playing notification bell sound...");
+        println!("[cce-notification-daemon] Playing notification bell sound...");
         if let Err(e) = std::process::Command::new("pw-play")
             .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
             .spawn()
         {
-            eprintln!("[clear-notification-daemon] Failed to spawn pw-play: {}", e);
+            eprintln!("[cce-notification-daemon] Failed to spawn pw-play: {}", e);
         }
     }
 }
 
 fn read_duration_if_configured() -> u64 {
-    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -465,7 +465,7 @@ fn read_duration_if_configured() -> u64 {
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -780,7 +780,7 @@ impl AppState {
                 let opacity = read_opacity_if_configured();
 
                 if self.state.is_none() {
-                    println!("[clear-notification-daemon] Opening notification window: {} - {}", summary, body);
+                    println!("[cce-notification-daemon] Opening notification window: {} - {}", summary, body);
                     let scale = clear_ui::wayland::detect_scale_factor(&self.output_state);
                     let pw = (360.0 * scale) as u32;
                     let ph = (100.0 * scale) as u32;
@@ -805,7 +805,7 @@ impl AppState {
                     state.needs_rebuild = true;
                     self.state = Some(state);
                 } else if let Some(ref mut state) = self.state {
-                    println!("[clear-notification-daemon] Updating active notification window: {} - {}", summary, body);
+                    println!("[cce-notification-daemon] Updating active notification window: {} - {}", summary, body);
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
@@ -824,7 +824,7 @@ impl AppState {
             }
             UserEvent::CloseNotification { notification_id } => {
                 if notification_id == self.current_id {
-                    println!("[clear-notification-daemon] Closing notification window (ID: {})...", notification_id);
+                    println!("[cce-notification-daemon] Closing notification window (ID: {})...", notification_id);
                     self.state = None; // Dropping the window and resources
                     self.redraw = true;
                 }
@@ -873,7 +873,7 @@ impl DbusInterface {
 
     async fn get_server_information(&self) -> (String, String, String, String) {
         (
-            "clear-notification-daemon".to_string(),
+            "cce-notification-daemon".to_string(),
             "CCEC Project".to_string(),
             "0.1.0".to_string(),
             "1.2".to_string(),
@@ -998,7 +998,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .expect("Failed to build D-Bus connection");
 
-            println!("[clear-notification-daemon] D-Bus listener registered. Running...");
+            println!("[cce-notification-daemon] D-Bus listener registered. Running...");
             
             // Keep background runtime alive
             loop {
@@ -1040,10 +1040,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }).unwrap();
 
-    println!("[clear-notification-daemon] Wayland event loop starting...");
+    println!("[cce-notification-daemon] Wayland event loop starting...");
     loop {
         if let Err(err) = event_loop.dispatch(std::time::Duration::from_millis(16), &mut app) {
-            eprintln!("[clear-notification-daemon] Event loop error (exiting): {:?}", err);
+            eprintln!("[cce-notification-daemon] Event loop error (exiting): {:?}", err);
             break;
         }
         if app.exit {
