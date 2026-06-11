@@ -156,7 +156,7 @@ impl NotificationApp {
         surface.set_buffer_scale(scale as i32);
         let window = xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, qh);
         window.set_title("Notification");
-        window.set_app_id("cce-notification-daemon");
+        window.set_app_id("clear-notification-daemon");
         window.set_min_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
         window.set_max_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
         window.commit();
