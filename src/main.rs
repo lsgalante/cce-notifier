@@ -718,11 +718,11 @@ impl WindowHandler for AppState {
         _serial: u32,
     ) {
         let (w, h) = configure.new_size;
-        if let (Some(w), Some(h)) = (w, h) {
-            let width = w.get();
-            let height = h.get();
-            if let Some(state) = &mut self.state {
-                state.configured = true;
+        if let Some(state) = &mut self.state {
+            state.configured = true;
+            if let (Some(w), Some(h)) = (w, h) {
+                let width = w.get();
+                let height = h.get();
                 let pw = (width as f64 * state.scale_factor) as u32;
                 let ph = (height as f64 * state.scale_factor) as u32;
                 state.resize(pw, ph);
