@@ -9,7 +9,7 @@ use glyphon::{
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window, delegate_output,
+    delegate_seat, delegate_shm, delegate_layer, delegate_output,
     registry::{ProvidesRegistryState, RegistryState},
     output::{OutputHandler, OutputState},
     seat::{
@@ -18,11 +18,10 @@ use smithay_client_toolkit::{
         Capability, SeatHandler, SeatState,
     },
     shell::{
-        xdg::{
-            window::{Window as XdgWindow, WindowConfigure, WindowHandler, WindowDecorations},
-            XdgShell,
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler,
+            LayerSurface, LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
     shm::{Shm, ShmHandler},
 };
@@ -110,7 +109,7 @@ struct RendererResources {
 }
 
 struct NotificationApp {
-    window: XdgWindow,
+    window: LayerSurface,
     surface: wl_surface::WlSurface,
     wgpu_surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -141,7 +140,7 @@ impl NotificationApp {
         conn: &Connection,
         qh: &QueueHandle<AppState>,
         compositor_state: &CompositorState,
-        xdg_shell_state: &XdgShell,
+        layer_shell_state: &LayerShell,
         width: u32,
         height: u32,
         scale: f64,
@@ -154,12 +153,22 @@ impl NotificationApp {
     ) -> Self {
         let surface = compositor_state.create_surface(qh);
         surface.set_buffer_scale(scale as i32);
-        let window = xdg_shell_state.create_window(surface.clone(), WindowDecorations::None, qh);
-        window.set_title("Notification");
-        window.set_app_id("clear-notification-daemon");
-        window.set_min_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
-        window.set_max_size(Some(((width as f64 / scale) as u32, (height as f64 / scale) as u32)));
-        window.commit();
+        
+        let logical_w = (width as f64 / scale) as u32;
+        let logical_h = (height as f64 / scale) as u32;
+        
+        let window = layer_shell_state.create_layer_surface(
+            qh,
+            surface.clone(),
+            Layer::Overlay,
+            Some("clear-notification-daemon".to_string()),
+            None,
+        );
+        window.set_size(logical_w, logical_h);
+        window.set_keyboard_interactivity(KeyboardInteractivity::None);
+        window.set_anchor(Anchor::TOP | Anchor::RIGHT);
+        window.set_margin(20, 20, 0, 0); // 20px margin from top and right
+        surface.commit();
 
         let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
             display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
@@ -506,7 +515,7 @@ enum UserEvent {
 struct AppState {
     registry_state: RegistryState,
     compositor_state: CompositorState,
-    xdg_shell_state: XdgShell,
+    layer_shell_state: LayerShell,
     shm_state: Shm,
     seat_state: SeatState,
     output_state: OutputState,
@@ -708,31 +717,29 @@ impl KeyboardHandler for AppState {
     ) {}
 }
 
-impl WindowHandler for AppState {
+impl LayerShellHandler for AppState {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+        self.state = None;
+        self.redraw = true;
+    }
+
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _window: &XdgWindow,
-        configure: WindowConfigure,
+        _layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
         let (w, h) = configure.new_size;
         if let Some(state) = &mut self.state {
             state.configured = true;
-            if let (Some(w), Some(h)) = (w, h) {
-                let width = w.get();
-                let height = h.get();
-                let pw = (width as f64 * state.scale_factor) as u32;
-                let ph = (height as f64 * state.scale_factor) as u32;
+            if w > 0 && h > 0 {
+                let pw = (w as f64 * state.scale_factor) as u32;
+                let ph = (h as f64 * state.scale_factor) as u32;
                 state.resize(pw, ph);
             }
         }
-        self.redraw = true;
-    }
-
-    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &XdgWindow) {
-        self.state = None;
         self.redraw = true;
     }
 }
@@ -761,8 +768,7 @@ impl ProvidesRegistryState for AppState {
 }
 
 delegate_compositor!(AppState);
-delegate_xdg_shell!(AppState);
-delegate_xdg_window!(AppState);
+delegate_layer!(AppState);
 delegate_shm!(AppState);
 delegate_seat!(AppState);
 delegate_pointer!(AppState);
@@ -788,7 +794,7 @@ impl AppState {
                         &self.conn,
                         &self.qh,
                         &self.compositor_state,
-                        &self.xdg_shell_state,
+                        &self.layer_shell_state,
                         pw,
                         ph,
                         scale,
@@ -889,7 +895,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let qh = event_queue.handle();
 
     let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
-    let xdg_shell_state = XdgShell::bind(&globals, &qh).unwrap();
+    let layer_shell_state = LayerShell::bind(&globals, &qh).unwrap();
     let shm_state = Shm::bind(&globals, &qh).unwrap();
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
@@ -1010,7 +1016,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = AppState {
         registry_state: RegistryState::new(&globals),
         compositor_state,
-        xdg_shell_state,
+        layer_shell_state,
         shm_state,
         seat_state,
         output_state,
