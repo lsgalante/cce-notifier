@@ -172,7 +172,7 @@ impl NotificationApp {
         window.set_margin(20, 20, 0, 0); // 20px margin from top and right
         surface.commit();
 
-        let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
+        let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
             display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
             surface_ptr: surface.id().as_ptr() as *mut std::ffi::c_void,
         }));
@@ -257,7 +257,7 @@ impl NotificationApp {
             y: 0.0,
             w: 6.0 * s,
             h: sh,
-            color: clear_ui::colors::TOGGLE_ON,
+            color: cce_ui::colors::TOGGLE_ON,
         });
 
         // 3. Text content
@@ -267,9 +267,9 @@ impl NotificationApp {
             x: 18.0 * s,
             y: 12.0 * s,
             color: glyphon::Color::rgb(
-                (clear_ui::colors::TEXT_DIM[0] * 255.0) as u8,
-                (clear_ui::colors::TEXT_DIM[1] * 255.0) as u8,
-                (clear_ui::colors::TEXT_DIM[2] * 255.0) as u8,
+                (cce_ui::colors::TEXT_DIM[0] * 255.0) as u8,
+                (cce_ui::colors::TEXT_DIM[1] * 255.0) as u8,
+                (cce_ui::colors::TEXT_DIM[2] * 255.0) as u8,
             ),
         });
 
@@ -279,9 +279,9 @@ impl NotificationApp {
             x: 18.0 * s,
             y: 28.0 * s,
             color: glyphon::Color::rgb(
-                (clear_ui::colors::TEXT_HEADER[0] * 255.0) as u8,
-                (clear_ui::colors::TEXT_HEADER[1] * 255.0) as u8,
-                (clear_ui::colors::TEXT_HEADER[2] * 255.0) as u8,
+                (cce_ui::colors::TEXT_HEADER[0] * 255.0) as u8,
+                (cce_ui::colors::TEXT_HEADER[1] * 255.0) as u8,
+                (cce_ui::colors::TEXT_HEADER[2] * 255.0) as u8,
             ),
         });
 
@@ -291,9 +291,9 @@ impl NotificationApp {
             x: 18.0 * s,
             y: 48.0 * s,
             color: glyphon::Color::rgb(
-                (clear_ui::colors::TEXT_FG[0] * 255.0) as u8,
-                (clear_ui::colors::TEXT_FG[1] * 255.0) as u8,
-                (clear_ui::colors::TEXT_FG[2] * 255.0) as u8,
+                (cce_ui::colors::TEXT_FG[0] * 255.0) as u8,
+                (cce_ui::colors::TEXT_FG[1] * 255.0) as u8,
+                (cce_ui::colors::TEXT_FG[2] * 255.0) as u8,
             ),
         });
 
@@ -525,9 +525,9 @@ fn read_bg_color_if_configured() -> [f32; 4] {
                         u8::from_str_radix(&hex[2..4], 16),
                         u8::from_str_radix(&hex[4..6], 16),
                     ) {
-                        let r_f = clear_ui::colors::srgb_to_linear(r as f32 / 255.0);
-                        let g_f = clear_ui::colors::srgb_to_linear(g as f32 / 255.0);
-                        let b_f = clear_ui::colors::srgb_to_linear(b as f32 / 255.0);
+                        let r_f = cce_ui::colors::srgb_to_linear(r as f32 / 255.0);
+                        let g_f = cce_ui::colors::srgb_to_linear(g as f32 / 255.0);
+                        let b_f = cce_ui::colors::srgb_to_linear(b as f32 / 255.0);
                         return [r_f, g_f, b_f, 1.0];
                     }
                 }
@@ -536,9 +536,9 @@ fn read_bg_color_if_configured() -> [f32; 4] {
     }
     // Default notification background color: srgb [0.08, 0.08, 0.12]
     [
-        clear_ui::colors::srgb_to_linear(0.08),
-        clear_ui::colors::srgb_to_linear(0.08),
-        clear_ui::colors::srgb_to_linear(0.12),
+        cce_ui::colors::srgb_to_linear(0.08),
+        cce_ui::colors::srgb_to_linear(0.08),
+        cce_ui::colors::srgb_to_linear(0.12),
         1.0,
     ]
 }
@@ -833,7 +833,7 @@ impl AppState {
 
                 if self.state.is_none() {
                     println!("[cce-notification-daemon] Opening notification window: {} - {}", summary, body);
-                    let scale = clear_ui::wayland::detect_scale_factor(&self.output_state);
+                    let scale = cce_ui::wayland::detect_scale_factor(&self.output_state);
                     let pw = (360.0 * scale) as u32;
                     let ph = (100.0 * scale) as u32;
                     let mut state = NotificationApp::new(
@@ -972,7 +972,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut text_atlas = TextAtlas::new(&wgpu_device, &wgpu_queue, &cache, wgpu::TextureFormat::Bgra8Unorm);
     let text_renderer = TextRenderer::new(&mut text_atlas, &wgpu_device, wgpu::MultisampleState::default(), None);
 
-    let shader_code = clear_ui::SHADER;
+    let shader_code = cce_ui::SHADER;
     let shader = wgpu_device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Shader"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader_code)),
