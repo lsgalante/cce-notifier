@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use zbus::{interface, connection};
 use zbus::zvariant::Value;
 use glyphon::{
@@ -27,7 +26,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle, Proxy,
 };
 use calloop::EventLoop;
@@ -108,6 +107,7 @@ struct RendererResources {
     cache: Cache,
 }
 
+#[allow(dead_code)]
 struct NotificationApp {
     window: LayerSurface,
     surface: wl_surface::WlSurface,
@@ -874,7 +874,7 @@ impl DbusInterface {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
 
     let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
