@@ -419,26 +419,10 @@ impl NotificationApp {
 }
 
 fn play_bell_if_configured() {
-    let config_path = "/home/lsgalante/.config/cce/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.json";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    
-    let mut in_section = false;
-    let mut bell_enabled = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[notifications]" {
-            in_section = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && in_section {
-            break;
-        }
-        if in_section && trimmed.starts_with("bell") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                bell_enabled = val.trim() == "true";
-            }
-        }
-    }
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let bell_enabled = val.pointer("/notifications/bell").and_then(|v| v.as_bool()).unwrap_or(false);
     
     if bell_enabled {
         println!("[cce-notification-daemon] Playing notification bell sound...");
@@ -452,85 +436,36 @@ fn play_bell_if_configured() {
 }
 
 fn read_duration_if_configured() -> u64 {
-    let config_path = "/home/lsgalante/.config/cce/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.json";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    
-    let mut in_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[notifications]" {
-            in_section = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && in_section {
-            break;
-        }
-        if in_section && trimmed.starts_with("duration") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                if let Ok(d) = val.trim().parse::<u64>() {
-                    return d;
-                }
-            }
-        }
-    }
-    5 // default to 5 seconds
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    val.pointer("/notifications/duration").and_then(|v| v.as_u64()).unwrap_or(5)
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/cce/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.json";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    
-    let mut in_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[notifications]" {
-            in_section = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && in_section {
-            break;
-        }
-        if in_section && trimmed.starts_with("opacity") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                if let Ok(o) = val.trim().parse::<f32>() {
-                    return o.clamp(0.0, 1.0);
-                }
-            }
-        }
-    }
-    0.9 // default opacity
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    val.pointer("/notifications/opacity").and_then(|v| v.as_f64()).map(|n| n as f32).unwrap_or(0.9)
 }
 
 fn read_bg_color_if_configured() -> [f32; 4] {
-    let config_path = "/home/lsgalante/.config/cce/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.json";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
     
-    let mut in_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[notifications]" {
-            in_section = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && in_section {
-            break;
-        }
-        if in_section && trimmed.starts_with("bg_color") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                let rest = val.trim_start_matches(|c: char| c == ' ' || c == '=' || c == '"');
-                let hex = rest.trim_end_matches('"').trim().trim_start_matches('#');
-                if hex.len() >= 6 {
-                    if let (Ok(r), Ok(g), Ok(b)) = (
-                        u8::from_str_radix(&hex[0..2], 16),
-                        u8::from_str_radix(&hex[2..4], 16),
-                        u8::from_str_radix(&hex[4..6], 16),
-                    ) {
-                        let r_f = cce_ui::colors::srgb_to_linear(r as f32 / 255.0);
-                        let g_f = cce_ui::colors::srgb_to_linear(g as f32 / 255.0);
-                        let b_f = cce_ui::colors::srgb_to_linear(b as f32 / 255.0);
-                        return [r_f, g_f, b_f, 1.0];
-                    }
-                }
+    if let Some(hex_str) = val.pointer("/notifications/bg_color").and_then(|v| v.as_str()) {
+        let hex = hex_str.trim_matches(|c| c == '"' || c == '\'' || c == ' ').trim_start_matches('#');
+        if hex.len() >= 6 {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&hex[0..2], 16),
+                u8::from_str_radix(&hex[2..4], 16),
+                u8::from_str_radix(&hex[4..6], 16),
+            ) {
+                let r_f = cce_ui::colors::srgb_to_linear(r as f32 / 255.0);
+                let g_f = cce_ui::colors::srgb_to_linear(g as f32 / 255.0);
+                let b_f = cce_ui::colors::srgb_to_linear(b as f32 / 255.0);
+                return [r_f, g_f, b_f, 1.0];
             }
         }
     }
