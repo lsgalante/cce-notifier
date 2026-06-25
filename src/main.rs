@@ -230,27 +230,11 @@ impl NotificationApp {
     }
 
     fn rebuild_layout(&mut self, font_system: &mut FontSystem) {
-        let sw = self.width as f32;
         let sh = self.height as f32;
         let s = self.scale_factor as f32;
 
         self.rects.clear();
         self.text_items.clear();
-
-        // 1. Dark Card Background
-        self.rects.push(RectWidget {
-            x: 0.0,
-            y: 0.0,
-            w: sw,
-            h: sh,
-            color: [
-                self.bg_color[0],
-                self.bg_color[1],
-                self.bg_color[2],
-                self.opacity,
-            ],
-        });
-
         // 2. Bright Green Left accent border
         self.rects.push(RectWidget {
             x: 0.0,
@@ -303,9 +287,48 @@ impl NotificationApp {
     fn collect_vertices(&self) -> Vec<Vertex> {
         let sw = self.width as f32;
         let sh = self.height as f32;
+        let s = self.scale_factor as f32;
         let mut verts = Vec::new();
+
+        // 1. Render Backplate (Background)
+        let backplate = cce_ui::widget::container::Backplate::new(0.0, 0.0, sw, sh)
+            .with_background([
+                self.bg_color[0],
+                self.bg_color[1],
+                self.bg_color[2],
+                self.opacity,
+            ]);
+
+        let bp_verts = cce_ui::engine::widget_vertices(&backplate, sw, sh, [0.0; 3]);
+        verts.extend(bp_verts.into_iter().map(|v| Vertex {
+            position: v.position,
+            color: v.color,
+            clip_circle: v.clip_circle,
+        }));
+
+        // 2. Render other rects (with rounded left accent border if applicable)
         for r in &self.rects {
-            verts.extend(quad_vertices(r.x, r.y, r.w, r.h, sw, sh, r.color));
+            if r.x == 0.0 && r.y == 0.0 && r.w == 6.0 * s {
+                let radius = cce_ui::colors::backplate_corner_radius();
+                let mut border_verts = Vec::new();
+                cce_ui::engine::push_rounded_rect_vertices_corners(
+                    r.x, r.y, r.w, r.h,
+                    radius,
+                    sw, sh,
+                    r.color,
+                    [0.0; 3],
+                    (true, false, false, true), // Top-left and bottom-left rounded
+                    None,
+                    &mut border_verts,
+                );
+                verts.extend(border_verts.into_iter().map(|v| Vertex {
+                    position: v.position,
+                    color: v.color,
+                    clip_circle: v.clip_circle,
+                }));
+            } else {
+                verts.extend(quad_vertices(r.x, r.y, r.w, r.h, sw, sh, r.color));
+            }
         }
         verts
     }
