@@ -382,7 +382,7 @@ impl NotificationApp {
                 return;
             }
             Err(wgpu::SurfaceError::Timeout) => return,
-            Err(e) => { eprintln!("Surface error: {e:?}"); return; }
+            Err(e) => { log::error!("Surface error: {:?}", e); return; }
         };
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -425,12 +425,12 @@ fn play_bell_if_configured() {
     let bell_enabled = val.pointer("/notifications/bell").and_then(|v| v.as_bool()).unwrap_or(false);
     
     if bell_enabled {
-        println!("[cce-notification-daemon] Playing notification bell sound...");
+        log::info!("Playing notification bell sound...");
         if let Err(e) = std::process::Command::new("pw-play")
             .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
             .spawn()
         {
-            eprintln!("[cce-notification-daemon] Failed to spawn pw-play: {}", e);
+            log::error!("Failed to spawn pw-play: {}", e);
         }
     }
 }
@@ -767,7 +767,7 @@ impl AppState {
                 let bg_color = read_bg_color_if_configured();
 
                 if self.state.is_none() {
-                    println!("[cce-notification-daemon] Opening notification window: {} - {}", summary, body);
+                    log::info!("Opening notification window: {} - {}", summary, body);
                     let scale = cce_ui::wayland::detect_scale_factor(&self.output_state);
                     let pw = (360.0 * scale) as u32;
                     let ph = (100.0 * scale) as u32;
@@ -793,7 +793,7 @@ impl AppState {
                     state.needs_rebuild = true;
                     self.state = Some(state);
                 } else if let Some(ref mut state) = self.state {
-                    println!("[cce-notification-daemon] Updating active notification window: {} - {}", summary, body);
+                    log::info!("Updating active notification window: {} - {}", summary, body);
                     state.app_name = app_name;
                     state.summary = summary;
                     state.body = body;
@@ -813,7 +813,7 @@ impl AppState {
             }
             UserEvent::CloseNotification { notification_id } => {
                 if notification_id == self.current_id {
-                    println!("[cce-notification-daemon] Closing notification window (ID: {})...", notification_id);
+                    log::info!("Closing notification window (ID: {})...", notification_id);
                     self.state = None; // Dropping the window and resources
                     self.redraw = true;
                 }
@@ -873,6 +873,7 @@ impl DbusInterface {
 // ── main ──
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let conn = Connection::connect_to_env().unwrap();
     let (globals, event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
@@ -987,7 +988,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .expect("Failed to build D-Bus connection");
 
-            println!("[cce-notification-daemon] D-Bus listener registered. Running...");
+            log::info!("D-Bus listener registered. Running...");
             
             // Keep background runtime alive
             loop {
@@ -1029,10 +1030,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }).unwrap();
 
-    println!("[cce-notification-daemon] Wayland event loop starting...");
+    log::info!("Wayland event loop starting...");
     loop {
         if let Err(err) = event_loop.dispatch(std::time::Duration::from_millis(16), &mut app) {
-            eprintln!("[cce-notification-daemon] Event loop error (exiting): {:?}", err);
+            log::error!("Event loop error (exiting): {:?}", err);
             break;
         }
         if app.exit {
