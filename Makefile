@@ -5,7 +5,7 @@ build:
 
 install: build
 	mkdir -p ~/.local/bin
-	install -m 755 ../target/release/cce-notification-daemon ~/.local/bin/cce-notification-daemon
+	install -m 755 ../target/release/cce-notifier ~/.local/bin/cce-notifier
 
 run:
 	cargo run

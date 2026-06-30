@@ -163,7 +163,7 @@ impl NotificationApp {
             qh,
             surface.clone(),
             Layer::Overlay,
-            Some("clear-notification-daemon".to_string()),
+            Some("cce-notifier".to_string()),
             None,
         );
         window.set_size(logical_w, logical_h);
@@ -885,7 +885,7 @@ impl DbusInterface {
 
     async fn get_server_information(&self) -> (String, String, String, String) {
         (
-            "cce-notification-daemon".to_string(),
+            "cce-notifier".to_string(),
             "CCEC Project".to_string(),
             "0.1.0".to_string(),
             "1.2".to_string(),
