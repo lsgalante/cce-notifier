@@ -250,11 +250,14 @@ impl NotificationApp {
             buffer: app_name_buf,
             x: 18.0 * s,
             y: 12.0 * s,
-            color: glyphon::Color::rgb(
-                (cce_ui::colors::TEXT_DIM[0] * 255.0) as u8,
-                (cce_ui::colors::TEXT_DIM[1] * 255.0) as u8,
-                (cce_ui::colors::TEXT_DIM[2] * 255.0) as u8,
-            ),
+            color: {
+                let srgb = cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM);
+                glyphon::Color::rgb(
+                    (srgb[0] * 255.0) as u8,
+                    (srgb[1] * 255.0) as u8,
+                    (srgb[2] * 255.0) as u8,
+                )
+            },
         });
 
         let summary_buf = make_text_buffer(font_system, &self.summary, 13.0 * s);
@@ -262,11 +265,14 @@ impl NotificationApp {
             buffer: summary_buf,
             x: 18.0 * s,
             y: 28.0 * s,
-            color: glyphon::Color::rgb(
-                (cce_ui::colors::TEXT_HEADER[0] * 255.0) as u8,
-                (cce_ui::colors::TEXT_HEADER[1] * 255.0) as u8,
-                (cce_ui::colors::TEXT_HEADER[2] * 255.0) as u8,
-            ),
+            color: {
+                let srgb = cce_ui::colors::to_srgb(cce_ui::colors::TEXT_HEADER);
+                glyphon::Color::rgb(
+                    (srgb[0] * 255.0) as u8,
+                    (srgb[1] * 255.0) as u8,
+                    (srgb[2] * 255.0) as u8,
+                )
+            },
         });
 
         let body_buf = make_text_buffer(font_system, &self.body, 11.0 * s);
@@ -274,11 +280,14 @@ impl NotificationApp {
             buffer: body_buf,
             x: 18.0 * s,
             y: 48.0 * s,
-            color: glyphon::Color::rgb(
-                (cce_ui::colors::TEXT_FG[0] * 255.0) as u8,
-                (cce_ui::colors::TEXT_FG[1] * 255.0) as u8,
-                (cce_ui::colors::TEXT_FG[2] * 255.0) as u8,
-            ),
+            color: {
+                let srgb = cce_ui::colors::to_srgb(cce_ui::colors::TEXT_FG);
+                glyphon::Color::rgb(
+                    (srgb[0] * 255.0) as u8,
+                    (srgb[1] * 255.0) as u8,
+                    (srgb[2] * 255.0) as u8,
+                )
+            },
         });
 
         self.needs_rebuild = false;
@@ -313,11 +322,10 @@ impl NotificationApp {
                 let mut border_verts = Vec::new();
                 cce_ui::engine::push_rounded_rect_vertices_corners(
                     r.x, r.y, r.w, r.h,
-                    radius,
+                    cce_ui::widget::CornerRadii::new(radius, 0.0, 0.0, radius),
                     sw, sh,
                     r.color,
                     [0.0; 3],
-                    (true, false, false, true), // Top-left and bottom-left rounded
                     None,
                     &mut border_verts,
                 );
