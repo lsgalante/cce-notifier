@@ -95,6 +95,11 @@ impl NotifierApp {
     fn rebuild_layout(&mut self) {
         self.text_items.clear();
         if self.visible {
+            // Use a configured (bundled) font family so glyph font-ids resolve
+            // in the engine's render FontSystem too — a bare default can pick a
+            // system font absent from the engine's bundled-only database.
+            let family = cce_ui::layout::statusbar_font_parsed().0;
+            let font = Some(family.as_str());
             // app name, summary, body (logical px; the engine applies HiDPI scale)
             self.text_items.push(TextItem::new(
                 &mut self.font_system,
@@ -103,7 +108,7 @@ impl NotifierApp {
                 18.0,
                 12.0,
                 glyphon_color(cce_ui::colors::TEXT_DIM),
-                None,
+                font,
                 None,
             ));
             self.text_items.push(TextItem::new(
@@ -113,7 +118,7 @@ impl NotifierApp {
                 18.0,
                 28.0,
                 glyphon_color(cce_ui::colors::TEXT_HEADER),
-                None,
+                font,
                 None,
             ));
             self.text_items.push(TextItem::new(
@@ -123,7 +128,7 @@ impl NotifierApp {
                 18.0,
                 48.0,
                 glyphon_color(cce_ui::colors::TEXT_FG),
-                None,
+                font,
                 None,
             ));
         }
