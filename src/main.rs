@@ -449,35 +449,8 @@ impl NotificationApp {
     }
 }
 
-struct CachedConfig {
-    last_modified: Option<std::time::SystemTime>,
-    parsed: Option<serde_json::Value>,
-}
-
-static CONFIG_CACHE: std::sync::RwLock<CachedConfig> = std::sync::RwLock::new(CachedConfig {
-    last_modified: None,
-    parsed: None,
-});
-
 fn load_config() -> serde_json::Value {
-    let path = cce_ui::config::get_config_path();
-    let current_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-    
-    if let Ok(cache) = CONFIG_CACHE.read() {
-        if cache.last_modified.is_some() && cache.last_modified == current_modified {
-            if let Some(ref val) = cache.parsed {
-                return val.clone();
-            }
-        }
-    }
-    
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let val = cce_ui::config::parse_kdl_to_json(&content);
-    if let Ok(mut cache) = CONFIG_CACHE.write() {
-        cache.last_modified = current_modified;
-        cache.parsed = Some(val.clone());
-    }
-    val
+    cce_ui::config::cached_config()
 }
 
 fn play_bell_if_configured() {
