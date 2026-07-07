@@ -951,7 +951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }, None)).expect("Failed to request wgpu device");
 
     // Initialize renderer resources once
-    let font_system = FontSystem::new();
+    let font_system = cce_ui::create_font_system_with_system_fonts();
     let swash_cache = SwashCache::new();
     let cache = Cache::new(&wgpu_device);
     let mut text_atlas = TextAtlas::new(&wgpu_device, &wgpu_queue, &cache, wgpu::TextureFormat::Bgra8Unorm);
