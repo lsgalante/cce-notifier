@@ -449,41 +449,86 @@ impl NotificationApp {
     }
 }
 
-fn play_bell_if_configured() {
-    let config_path = "/home/lsgalante/.config/cce/config.json";
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-    let bell_enabled = val.pointer("/notifications/bell").and_then(|v| v.as_bool()).unwrap_or(false);
+struct CachedConfig {
+    last_modified: Option<std::time::SystemTime>,
+    parsed: Option<serde_json::Value>,
+}
+
+static CONFIG_CACHE: std::sync::RwLock<CachedConfig> = std::sync::RwLock::new(CachedConfig {
+    last_modified: None,
+    parsed: None,
+});
+
+fn load_config() -> serde_json::Value {
+    let path = "/home/lsgalante/.config/cce/config.kdl";
+    let current_modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     
-    if bell_enabled {
-        log::info!("Playing notification bell sound...");
-        if let Err(e) = std::process::Command::new("pw-play")
-            .arg("/usr/share/sounds/freedesktop/stereo/bell.oga")
+    if let Ok(cache) = CONFIG_CACHE.read() {
+        if cache.last_modified.is_some() && cache.last_modified == current_modified {
+            if let Some(ref val) = cache.parsed {
+                return val.clone();
+            }
+        }
+    }
+    
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let val = cce_ui::config::parse_kdl_to_json(&content);
+    if let Ok(mut cache) = CONFIG_CACHE.write() {
+        cache.last_modified = current_modified;
+        cache.parsed = Some(val.clone());
+    }
+    val
+}
+
+fn play_bell_if_configured() {
+    let val = load_config();
+    let sound_type = val.pointer("/notifications/bell").and_then(|v| v.as_str()).unwrap_or("none");
+    
+    let sound_event = match sound_type {
+        "bell" => Some("bell"),
+        "dialog" => Some("dialog-information"),
+        "message" => Some("message"),
+        _ => None,
+    };
+    
+    if let Some(event) = sound_event {
+        log::info!("Playing notification sound ({})...", sound_type);
+        if std::process::Command::new("canberra-gtk-play")
+            .arg("-i")
+            .arg(event)
             .spawn()
+            .is_err()
         {
-            log::error!("Failed to spawn pw-play: {}", e);
+            let sound_file = match sound_type {
+                "bell" => "/usr/share/sounds/freedesktop/stereo/bell.oga",
+                "dialog" => "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
+                "message" => "/usr/share/sounds/freedesktop/stereo/message.oga",
+                _ => "",
+            };
+            if !sound_file.is_empty() {
+                if let Err(e) = std::process::Command::new("pw-play")
+                    .arg(sound_file)
+                    .spawn()
+                {
+                    log::error!("Failed to spawn pw-play: {}", e);
+                }
+            }
         }
     }
 }
 
 fn read_duration_if_configured() -> u64 {
-    let config_path = "/home/lsgalante/.config/cce/config.json";
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let val = load_config();
     val.pointer("/notifications/duration").and_then(|v| v.as_u64()).unwrap_or(5)
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/cce/config.json";
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let val = load_config();
     val.pointer("/notifications/opacity").and_then(|v| v.as_f64()).map(|n| n as f32).unwrap_or(0.9)
 }
 
 fn read_bg_color_if_configured() -> [f32; 4] {
-    let config_path = "/home/lsgalante/.config/cce/config.json";
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let val = load_config();
     
     if let Some(hex_str) = val.pointer("/notifications/bg_color").and_then(|v| v.as_str()) {
         let hex = hex_str.trim_matches(|c| c == '"' || c == '\'' || c == ' ').trim_start_matches('#');
