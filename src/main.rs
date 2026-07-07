@@ -455,13 +455,11 @@ fn play_bell_if_configured() {
 }
 
 fn read_duration_if_configured() -> u64 {
-    let val = load_config();
-    val.pointer("/notifications/duration").and_then(|v| v.as_u64()).unwrap_or(5)
+    cce_ui::config::get_i64("/notifications/duration", 5) as u64
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let val = load_config();
-    val.pointer("/notifications/opacity").and_then(|v| v.as_f64()).map(|n| n as f32).unwrap_or(0.9)
+    cce_ui::config::get_f32("/notifications/opacity", 0.9)
 }
 
 fn read_bg_color_if_configured() -> [f32; 4] {
