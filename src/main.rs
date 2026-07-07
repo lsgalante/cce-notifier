@@ -504,18 +504,8 @@ fn read_bg_color_if_configured() -> [f32; 4] {
     let val = load_config();
     
     if let Some(hex_str) = val.pointer("/notifications/bg_color").and_then(|v| v.as_str()) {
-        let hex = hex_str.trim_matches(|c| c == '"' || c == '\'' || c == ' ').trim_start_matches('#');
-        if hex.len() >= 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&hex[0..2], 16),
-                u8::from_str_radix(&hex[2..4], 16),
-                u8::from_str_radix(&hex[4..6], 16),
-            ) {
-                let r_f = cce_ui::colors::srgb_to_linear(r as f32 / 255.0);
-                let g_f = cce_ui::colors::srgb_to_linear(g as f32 / 255.0);
-                let b_f = cce_ui::colors::srgb_to_linear(b as f32 / 255.0);
-                return [r_f, g_f, b_f, 1.0];
-            }
+        if let Some([r, g, b, _]) = cce_ui::color::parse_hex_rgba_linear(hex_str) {
+            return [r, g, b, 1.0];
         }
     }
     // Default notification background color: srgb [0.08, 0.08, 0.12]
