@@ -34,44 +34,8 @@ use calloop_wayland_source::WaylandSource;
 
 // ── Vertices and rendering structures ──
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
-    color: [f32; 4],
-    clip_circle: [f32; 3],
-}
-
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
-        0 => Float32x2,
-        1 => Float32x4,
-        2 => Float32x3,
-    ];
-
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
-    }
-}
-
-fn quad_vertices(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32, c: [f32; 4]) -> [Vertex; 6] {
-    let x0 = (x / sw) * 2.0 - 1.0;
-    let y0 = 1.0 - (y / sh) * 2.0;
-    let x1 = ((x + w) / sw) * 2.0 - 1.0;
-    let y1 = 1.0 - ((y + h) / sh) * 2.0;
-    [
-        Vertex { position: [x0, y0], color: c, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color: c, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color: c, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color: c, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y1], color: c, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color: c, clip_circle: [0.0; 3] },
-    ]
-}
+// Vertex and quad_vertices are shared from the cce-ui engine.
+use cce_ui::engine::{quad_vertices, Vertex};
 
 fn make_text_buffer(fs: &mut FontSystem, text: &str, size: f32) -> Buffer {
     let metrics = Metrics::new(size, size * 1.4);
