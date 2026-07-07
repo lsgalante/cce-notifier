@@ -460,8 +460,8 @@ static CONFIG_CACHE: std::sync::RwLock<CachedConfig> = std::sync::RwLock::new(Ca
 });
 
 fn load_config() -> serde_json::Value {
-    let path = "/home/lsgalante/.config/cce/config.kdl";
-    let current_modified = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    let path = cce_ui::config::get_config_path();
+    let current_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
     
     if let Ok(cache) = CONFIG_CACHE.read() {
         if cache.last_modified.is_some() && cache.last_modified == current_modified {
@@ -471,7 +471,7 @@ fn load_config() -> serde_json::Value {
         }
     }
     
-    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
     let val = cce_ui::config::parse_kdl_to_json(&content);
     if let Ok(mut cache) = CONFIG_CACHE.write() {
         cache.last_modified = current_modified;
