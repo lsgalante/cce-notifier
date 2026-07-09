@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use zbus::zvariant::Value;
 use zbus::{connection, interface};
 
-use glyphon::FontSystem;
 use wayland_client::QueueHandle;
 
 use cce_ui::engine::{
     Application, EngineState, LayerAnchor, LayerKeyboardInteractivity, LayerKind, LayerSettings,
-    LogicalPosition, LogicalSize, WindowSettings,
+    LogicalPosition, WindowSettings,
 };
-use cce_ui::widget::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, TextItem};
+use cce_ui::widget::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 
 const NOTIF_WIDTH: u32 = 360;
 const NOTIF_HEIGHT: u32 = 100;
@@ -65,19 +64,22 @@ fn play_bell_if_configured() {
     }
 }
 
-fn glyphon_color(linear: [f32; 4]) -> glyphon::Color {
+fn srgb_u8(linear: [f32; 4]) -> [u8; 3] {
     let srgb = cce_ui::colors::to_srgb(linear);
-    glyphon::Color::rgb(
+    [
         (srgb[0] * 255.0) as u8,
         (srgb[1] * 255.0) as u8,
         (srgb[2] * 255.0) as u8,
-    )
+    ]
 }
 
 // ── Application ───────────────────────────────────────────────────────────
+//
+// Phase 6 shape: the whole frame — accent quad and text — is one display list
+// (`display_list` + `display_list_text`); the engine shapes the text through the shared
+// buffer cache. No app-side FontSystem, TextItem cache, or rebuild bookkeeping.
 
 struct NotifierApp {
-    font_system: FontSystem,
     app_name: String,
     summary: String,
     body: String,
@@ -85,55 +87,7 @@ struct NotifierApp {
     dismiss_timer: f32,
     opacity: f32,
     bg_color: [f32; 4],
-    scale_factor: f64,
-    needs_rebuild: bool,
-    text_items: Vec<TextItem>,
     sender: calloop::channel::Sender<UserEvent>,
-}
-
-impl NotifierApp {
-    fn rebuild_layout(&mut self) {
-        self.text_items.clear();
-        if self.visible {
-            // Use a configured (bundled) font family so glyph font-ids resolve
-            // in the engine's render FontSystem too — a bare default can pick a
-            // system font absent from the engine's bundled-only database.
-            let family = cce_ui::layout::statusbar_font_parsed().0;
-            let font = Some(family.as_str());
-            // app name, summary, body (logical px; the engine applies HiDPI scale)
-            self.text_items.push(TextItem::new(
-                &mut self.font_system,
-                &self.app_name,
-                10.0,
-                18.0,
-                12.0,
-                glyphon_color(cce_ui::colors::TEXT_DIM),
-                font,
-                None,
-            ));
-            self.text_items.push(TextItem::new(
-                &mut self.font_system,
-                &self.summary,
-                13.0,
-                18.0,
-                28.0,
-                glyphon_color(cce_ui::colors::TEXT_HEADER),
-                font,
-                None,
-            ));
-            self.text_items.push(TextItem::new(
-                &mut self.font_system,
-                &self.body,
-                11.0,
-                18.0,
-                48.0,
-                glyphon_color(cce_ui::colors::TEXT_FG),
-                font,
-                None,
-            ));
-        }
-        self.needs_rebuild = false;
-    }
 }
 
 impl Application for NotifierApp {
@@ -141,7 +95,6 @@ impl Application for NotifierApp {
 
     fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
         Self {
-            font_system: cce_ui::create_font_system_with_system_fonts(),
             app_name: String::new(),
             summary: String::new(),
             body: String::new(),
@@ -149,9 +102,6 @@ impl Application for NotifierApp {
             dismiss_timer: 0.0,
             opacity: read_opacity(),
             bg_color: read_bg_color(),
-            scale_factor: 1.0,
-            needs_rebuild: false,
-            text_items: Vec::new(),
             sender,
         }
     }
@@ -189,12 +139,10 @@ impl Application for NotifierApp {
                 self.bg_color = read_bg_color();
                 self.visible = true;
                 self.dismiss_timer = read_duration();
-                self.needs_rebuild = true;
                 *needs_rebuild = true;
             }
             UserEvent::CloseNotification => {
                 self.visible = false;
-                self.needs_rebuild = true;
                 *needs_rebuild = true;
             }
         }
@@ -205,25 +153,37 @@ impl Application for NotifierApp {
             self.dismiss_timer -= dt;
             if self.dismiss_timer <= 0.0 {
                 self.visible = false;
-                self.needs_rebuild = true;
                 *needs_rebuild = true;
             }
         }
     }
 
-    fn view(&mut self, quads: &mut Vec<(f32, f32, f32, f32, [f32; 4])>, size: LogicalSize, scale: f64) {
-        if self.needs_rebuild || (self.scale_factor - scale).abs() > f64::EPSILON {
-            self.scale_factor = scale;
-            self.rebuild_layout();
-        }
+    /// The whole frame as one display list (Phase 6): the green accent border plus the three
+    /// text lines. Coordinates are logical px; the engine applies HiDPI scale and shapes the
+    /// text through its shared buffer cache.
+    fn display_list(&mut self) -> Option<cce_ui::scene::paint::DisplayList> {
+        use cce_ui::scene::layout::Rect;
+        use cce_ui::scene::paint::PaintCtx;
+        let mut pc = PaintCtx::new();
         if self.visible {
-            // Bright green left accent border.
-            quads.push((0.0, 0.0, 6.0, size.height, cce_ui::colors::TOGGLE_ON));
+            pc.quad(
+                Rect { x: 0.0, y: 0.0, width: 6.0, height: NOTIF_HEIGHT as f32 },
+                cce_ui::colors::TOGGLE_ON,
+            );
+            // Use a configured (bundled) font family so glyph font-ids resolve in the
+            // engine's render FontSystem — a bare default can pick a system font absent
+            // from the engine's bundled-only database.
+            let family = cce_ui::layout::statusbar_font_parsed().0;
+            let font = Some(family);
+            pc.text_with(&self.app_name, 18.0, 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), None);
+            pc.text_with(&self.summary, 18.0, 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), None);
+            pc.text_with(&self.body, 18.0, 48.0, 11.0, srgb_u8(cce_ui::colors::TEXT_FG), font, None);
         }
+        Some(pc.finish())
     }
 
-    fn text_items(&self) -> &[TextItem] {
-        &self.text_items
+    fn display_list_text(&self) -> bool {
+        true
     }
 
     fn clear_color(&self) -> [f32; 4] {
