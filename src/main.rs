@@ -14,12 +14,18 @@ use cce_ui::widget::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 const NOTIF_WIDTH: u32 = 360;
 const NOTIF_HEIGHT: u32 = 100;
 
+// Image previews (the freedesktop `image-path` hint, e.g. screenshots) fit
+// this box, aspect-preserved, left of the text.
+const THUMB_MAX_W: f32 = 100.0;
+const THUMB_MAX_H: f32 = 76.0;
+
 #[derive(Debug, Clone)]
 enum UserEvent {
     NewNotification {
         app_name: String,
         summary: String,
         body: String,
+        image_path: Option<String>,
     },
     CloseNotification,
 }
@@ -64,6 +70,47 @@ fn play_bell_if_configured() {
     }
 }
 
+/// Decode a PNG and nearest-neighbor downscale it to fit the thumbnail box.
+/// Returns RGBA8 pixels plus dimensions; None for unreadable/non-PNG files.
+fn load_thumbnail(path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf[..w * h * 4].to_vec(),
+        png::ColorType::Rgb => buf[..w * h * 3]
+            .chunks_exact(3)
+            .flat_map(|px| [px[0], px[1], px[2], 255])
+            .collect(),
+        png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf[..w * h * 2]
+            .chunks_exact(2)
+            .flat_map(|px| [px[0], px[0], px[0], px[1]])
+            .collect(),
+        _ => return None,
+    };
+
+    let scale = (THUMB_MAX_W / w as f32).min(THUMB_MAX_H / h as f32).min(1.0);
+    let (tw, th) = (
+        ((w as f32 * scale) as usize).max(1),
+        ((h as f32 * scale) as usize).max(1),
+    );
+    let mut thumb = Vec::with_capacity(tw * th * 4);
+    for ty in 0..th {
+        let sy = ty * h / th;
+        for tx in 0..tw {
+            let sx = tx * w / tw;
+            let i = (sy * w + sx) * 4;
+            thumb.extend_from_slice(&rgba[i..i + 4]);
+        }
+    }
+    Some((thumb, tw as u32, th as u32))
+}
+
 fn srgb_u8(linear: [f32; 4]) -> [u8; 3] {
     let srgb = cce_ui::colors::to_srgb(linear);
     [
@@ -83,11 +130,21 @@ struct NotifierApp {
     app_name: String,
     summary: String,
     body: String,
+    /// Uploaded preview image (id from `vk::upload_rgba`, logical w, h).
+    image: Option<(u32, f32, f32)>,
     visible: bool,
     dismiss_timer: f32,
     opacity: f32,
     bg_color: [f32; 4],
     sender: calloop::channel::Sender<UserEvent>,
+}
+
+impl NotifierApp {
+    fn free_image(&mut self) {
+        if let Some((id, _, _)) = self.image.take() {
+            cce_ui::vk::free_image(id);
+        }
+    }
 }
 
 impl Application for NotifierApp {
@@ -98,6 +155,7 @@ impl Application for NotifierApp {
             app_name: String::new(),
             summary: String::new(),
             body: String::new(),
+            image: None,
             visible: false,
             dismiss_timer: 0.0,
             opacity: read_opacity(),
@@ -130,11 +188,18 @@ impl Application for NotifierApp {
 
     fn update(&mut self, msg: Self::Message, needs_rebuild: &mut bool, _exit: &mut bool) {
         match msg {
-            UserEvent::NewNotification { app_name, summary, body } => {
+            UserEvent::NewNotification { app_name, summary, body, image_path } => {
                 play_bell_if_configured();
                 self.app_name = app_name;
                 self.summary = summary;
                 self.body = body;
+                self.free_image();
+                if let Some(path) = image_path {
+                    if let Some((pixels, w, h)) = load_thumbnail(&path) {
+                        let id = cce_ui::vk::upload_rgba(pixels, w, h);
+                        self.image = Some((id, w as f32, h as f32));
+                    }
+                }
                 self.opacity = read_opacity();
                 self.bg_color = read_bg_color();
                 self.visible = true;
@@ -143,6 +208,7 @@ impl Application for NotifierApp {
             }
             UserEvent::CloseNotification => {
                 self.visible = false;
+                self.free_image();
                 *needs_rebuild = true;
             }
         }
@@ -153,6 +219,7 @@ impl Application for NotifierApp {
             self.dismiss_timer -= dt;
             if self.dismiss_timer <= 0.0 {
                 self.visible = false;
+                self.free_image();
                 *needs_rebuild = true;
             }
         }
@@ -170,14 +237,23 @@ impl Application for NotifierApp {
                 Rect { x: 0.0, y: 0.0, width: 6.0, height: NOTIF_HEIGHT as f32 },
                 cce_ui::colors::TOGGLE_ON,
             );
+            // Preview thumbnail (screenshots etc.) centered in its box left of
+            // the text, which shifts right to make room.
+            let mut text_x = 18.0;
+            if let Some((id, w, h)) = self.image {
+                let ix = 14.0 + (THUMB_MAX_W - w) / 2.0;
+                let iy = (NOTIF_HEIGHT as f32 - h) / 2.0;
+                pc.image(id, Rect { x: ix, y: iy, width: w, height: h }, 1.0);
+                text_x = 14.0 + THUMB_MAX_W + 12.0;
+            }
             // Use a configured (bundled) font family so glyph font-ids resolve in the
             // engine's render FontSystem — a bare default can pick a system font absent
             // from the engine's bundled-only database.
             let family = cce_ui::layout::statusbar_font_parsed().0;
             let font = Some(family);
-            pc.text_with(&self.app_name, 18.0, 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), None);
-            pc.text_with(&self.summary, 18.0, 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), None);
-            pc.text_with(&self.body, 18.0, 48.0, 11.0, srgb_u8(cce_ui::colors::TEXT_FG), font, None);
+            pc.text_with(&self.app_name, text_x, 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), None);
+            pc.text_with(&self.summary, text_x, 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), None);
+            pc.text_with(&self.body, text_x, 48.0, 11.0, srgb_u8(cce_ui::colors::TEXT_FG), font, None);
         }
         Some(pc.finish())
     }
@@ -269,14 +345,25 @@ impl DbusInterface {
         &self,
         app_name: String,
         _replaces_id: u32,
-        _app_icon: String,
+        app_icon: String,
         summary: String,
         body: String,
         _actions: Vec<String>,
-        _hints: HashMap<String, Value<'_>>,
+        hints: HashMap<String, Value<'_>>,
         _expire_timeout: i32,
     ) -> u32 {
-        let _ = self.sender.send(UserEvent::NewNotification { app_name, summary, body });
+        // Preview image: the standard `image-path` hint (spec 1.2; `image_path`
+        // is the 1.1 spelling), else an absolute-path app_icon.
+        let hint_str = |key: &str| -> Option<String> {
+            match hints.get(key) {
+                Some(Value::Str(s)) => Some(s.to_string()),
+                _ => None,
+            }
+        };
+        let image_path = hint_str("image-path")
+            .or_else(|| hint_str("image_path"))
+            .or_else(|| app_icon.starts_with('/').then(|| app_icon.clone()));
+        let _ = self.sender.send(UserEvent::NewNotification { app_name, summary, body, image_path });
         1
     }
 
