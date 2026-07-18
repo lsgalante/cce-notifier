@@ -36,21 +36,54 @@ fn read_duration() -> f32 {
     cce_ui::config::get_i64("/notifications/duration", 5) as f32
 }
 
-fn read_opacity() -> f32 {
-    cce_ui::config::get_f32("/notifications/opacity", 0.9)
+/// The notification backplate style: per-app `backplate { }` keys from
+/// `~/.config/cce/cce-notifier/config.kdl` (merged over the global config by
+/// `parse_kdl_to_json`), falling back to the shared `style.surface.plate`
+/// values for anything unset.
+struct PlateStyle {
+    fill: [f32; 4],
+    border: Option<([f32; 4], f32)>,
+    radius: f32,
+    blur: bool,
+    opacity: f32,
 }
 
-fn read_bg_color() -> [f32; 4] {
-    cce_ui::config::get_string("/notifications/bg_color")
-        .as_deref()
-        .and_then(cce_ui::color::parse_hex_rgba_linear)
-        .map(|[r, g, b, _]| [r, g, b, 1.0])
+fn read_plate_style() -> PlateStyle {
+    // Shared plate colors are stored linear (color.rs gamma-corrects on load),
+    // so the override keys parse linear too.
+    let linear = |ptr: &str| {
+        cce_ui::config::get_string(ptr)
+            .as_deref()
+            .and_then(cce_ui::color::parse_hex_rgba_linear)
+    };
+    let fill = linear("/backplate/color")
+        .or_else(cce_ui::colors::plate_color)
         .unwrap_or([
             cce_ui::colors::srgb_to_linear(0.08),
             cce_ui::colors::srgb_to_linear(0.08),
             cce_ui::colors::srgb_to_linear(0.12),
             1.0,
-        ])
+        ]);
+    let border = linear("/backplate/border_color")
+        .or_else(cce_ui::colors::plate_border_color)
+        .map(|c| {
+            let t = cce_ui::config::get_f32(
+                "/backplate/border_thickness",
+                cce_ui::colors::plate_border_thickness(),
+            );
+            (c, t)
+        })
+        .filter(|&(_, t)| t > 0.0);
+    PlateStyle {
+        fill,
+        border,
+        radius: cce_ui::config::get_f32(
+            "/backplate/corner_radius",
+            cce_ui::layout::plate_corner_radius(),
+        ),
+        blur: cce_ui::config::get_bool("/backplate/blur", cce_ui::colors::plate_blur()),
+        opacity: cce_ui::config::get_f32("/backplate/opacity", cce_ui::layout::plate_opacity()),
+    }
 }
 
 fn play_bell_if_configured() {
@@ -134,8 +167,7 @@ struct NotifierApp {
     image: Option<(u32, f32, f32)>,
     visible: bool,
     dismiss_timer: f32,
-    opacity: f32,
-    bg_color: [f32; 4],
+    plate: PlateStyle,
     sender: calloop::channel::Sender<UserEvent>,
 }
 
@@ -158,8 +190,7 @@ impl Application for NotifierApp {
             image: None,
             visible: false,
             dismiss_timer: 0.0,
-            opacity: read_opacity(),
-            bg_color: read_bg_color(),
+            plate: read_plate_style(),
             sender,
         }
     }
@@ -176,12 +207,17 @@ impl Application for NotifierApp {
     }
 
     fn layer(&self) -> Option<LayerSettings> {
+        // Sit below the status modules with one bar-spacing of gap, right edge aligned
+        // with the rightmost top-right module (the clock): the compositor lays the bar
+        // out at y=0, height `layout.bar_height`, flush to `output_width - MARGIN`
+        // with SPACING between segments (cce-window-manager arrange.rs, both 12).
+        let bar_h = cce_ui::config::get_i64("/layout/bar_height", 24) as i32;
         Some(LayerSettings {
             layer: LayerKind::Overlay,
             anchor: LayerAnchor::TOP | LayerAnchor::RIGHT,
             exclusive_zone: 0,
             keyboard_interactivity: LayerKeyboardInteractivity::None,
-            margin: (20, 20, 0, 0),
+            margin: (bar_h + 12, 12, 0, 0),
             namespace: "cce-notifier".to_string(),
         })
     }
@@ -200,8 +236,7 @@ impl Application for NotifierApp {
                         self.image = Some((id, w as f32, h as f32));
                     }
                 }
-                self.opacity = read_opacity();
-                self.bg_color = read_bg_color();
+                self.plate = read_plate_style();
                 self.visible = true;
                 self.dismiss_timer = read_duration();
                 *needs_rebuild = true;
@@ -233,10 +268,30 @@ impl Application for NotifierApp {
         use cce_ui::scene::paint::PaintCtx;
         let mut pc = PaintCtx::new();
         if self.visible {
-            pc.quad(
-                Rect { x: 0.0, y: 0.0, width: 6.0, height: NOTIF_HEIGHT as f32 },
-                cce_ui::colors::TOGGLE_ON,
-            );
+            // The backplate (per-app `backplate { }` keys over the shared plate style;
+            // blur via the negative-alpha marker), replacing the old clear-color background.
+            let surface = Rect { x: 0.0, y: 0.0, width: NOTIF_WIDTH as f32, height: NOTIF_HEIGHT as f32 };
+            let radius = self.plate.radius;
+            let mut fill = self.plate.fill;
+            fill[3] *= self.plate.opacity;
+            if self.plate.blur {
+                fill[3] = -fill[3].abs();
+            }
+            match self.plate.border {
+                Some((border, thickness)) => {
+                    pc.border(surface, (radius, radius, radius, radius), fill, border, thickness)
+                }
+                None => {
+                    let on = radius > 0.0;
+                    pc.rounded_rect(surface, radius, (on, on, on, on), fill);
+                }
+            }
+            pc.clip_rounded(surface, radius, |pc| {
+                pc.quad(
+                    Rect { x: 0.0, y: 0.0, width: 6.0, height: NOTIF_HEIGHT as f32 },
+                    cce_ui::colors::TOGGLE_ON,
+                );
+            });
             // Preview thumbnail (screenshots etc.) centered in its box left of
             // the text, which shifts right to make room.
             let mut text_x = 18.0;
@@ -262,12 +317,10 @@ impl Application for NotifierApp {
         true
     }
 
+    /// Always transparent: the background is the plate drawn in `display_list`, so the
+    /// surface itself stays clear (and rounded plate corners show through).
     fn clear_color(&self) -> [f32; 4] {
-        if self.visible {
-            [self.bg_color[0], self.bg_color[1], self.bg_color[2], self.opacity]
-        } else {
-            [0.0, 0.0, 0.0, 0.0]
-        }
+        [0.0, 0.0, 0.0, 0.0]
     }
 
     /// When hidden, drop the input region so the transparent overlay is
