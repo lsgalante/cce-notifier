@@ -3,11 +3,13 @@
 build:
 	cargo build --release
 
+# Binaries, helper scripts and user units are enumerated by ccebuild from
+# cargo metadata, so this crate's extra [[bin]] targets are picked up without
+# being named here — hand-listing them is what left cce-bevel and the keyring
+# helpers uninstalled for weeks.
 install: build
-	mkdir -p ~/.local/bin
-	install -m 755 ../target/release/cce-notifier ~/.local/bin/cce-notifier
-	mkdir -p ~/.config/systemd/user
-	install -m 644 cce-notifier.service ~/.config/systemd/user/cce-notifier.service
+	@command -v ccebuild >/dev/null || { echo "ccebuild not installed — run: make -C ../cce-compositor install"; exit 1; }
+	ccebuild install --no-build cce-notifier
 
 run:
 	cargo run
