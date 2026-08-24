@@ -38,6 +38,26 @@ const CARD_PAD_B: f32 = 6.0;
 const BODY_TOP: f32 = 46.0;
 const BODY_SIZE: f32 = 11.0;
 
+/// Body lines a card has room for: `box_height` (48) over the engine's 1.4 line
+/// height at [`BODY_SIZE`] (15.4) — three lines, 46.2. Kept as a number because
+/// the ellipsis fit has to reason about it, and asserted against the geometry
+/// in the tests below so the two cannot drift.
+const BODY_LINES: usize = 3;
+
+/// Where the text column starts: the thumbnail pushes it right of the image box.
+fn text_origin(has_image: bool) -> f32 {
+    if has_image {
+        14.0 + THUMB_MAX_W + 12.0
+    } else {
+        18.0
+    }
+}
+
+/// The column the body wraps into — origin to the card's right padding.
+fn body_wrap_width(has_image: bool) -> f32 {
+    NOTIF_WIDTH as f32 - text_origin(has_image) - CARD_PAD
+}
+
 #[derive(Debug, Clone)]
 enum UserEvent {
     NewNotification {
@@ -170,6 +190,70 @@ fn load_thumbnail(path: &str) -> Option<(Vec<u8>, u32, u32)> {
     Some((thumb, tw as u32, th as u32))
 }
 
+/// How many lines `text` wraps to in a column `wrap_w` wide.
+///
+/// Measured through the engine's OWN boxed-text layout — the same call the
+/// renderer makes for a `text_boxed` prim — so the count cannot drift from what
+/// is actually drawn (its 1.4 line height and the scale factor are applied
+/// inside). The height is left effectively unbounded on purpose: pass the card's
+/// real `box_height` and cosmic-text stops shaping at the lines that fit, which
+/// is exactly the overflow this needs to detect.
+fn wrapped_line_count(text: &str, wrap_w: f32, font: Option<&str>) -> usize {
+    let Ok(mut fs) = cce_ui::geometry_font_system().lock() else {
+        return 1;
+    };
+    let (buffer, _) = cce_ui::engine::get_text_buffer_laid_out(
+        &mut fs,
+        text,
+        BODY_SIZE,
+        font,
+        cce_ui::scene::paint::TextAttrs::default(),
+        cce_ui::scene::paint::TextLayout {
+            wrap_width: Some(wrap_w),
+            box_height: 10_000.0,
+            align_h: cce_ui::scene::paint::AlignH::Left,
+            align_v: cce_ui::scene::paint::AlignV::Top,
+        },
+    );
+    buffer.layout_runs().count()
+}
+
+/// The body as it should be drawn: unchanged when it fits, else cut to the most
+/// text that still fits [`BODY_LINES`] lines *with* an ellipsis appended.
+///
+/// A card is a fixed height, so a long body is truncated either way — this only
+/// decides whether the reader can see that it was. Binary search over the char
+/// prefix, re-measuring each candidate, because where the text wraps (and so
+/// how much fits) depends on the words themselves, not the character count.
+/// Called once per notification on arrival, never per frame.
+fn fit_body(body: &str, wrap_w: f32, font: Option<&str>) -> String {
+    if body.is_empty() || wrapped_line_count(body, wrap_w, font) <= BODY_LINES {
+        return body.to_string();
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let with_ellipsis = |n: usize| -> String {
+        let mut s: String = chars[..n].iter().collect();
+        // Trim first so the ellipsis follows the word, not the space after it.
+        while s.ends_with(char::is_whitespace) {
+            s.pop();
+        }
+        s.push('…');
+        s
+    };
+    // Largest prefix that still fits. `fits(0)` is just the ellipsis, so the
+    // search always has an answer to fall back on.
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if wrapped_line_count(&with_ellipsis(mid), wrap_w, font) <= BODY_LINES {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    with_ellipsis(lo)
+}
+
 fn srgb_u8(linear: [f32; 4]) -> [u8; 3] {
     let srgb = cce_ui::colors::to_srgb(linear);
     [
@@ -216,12 +300,11 @@ fn draw_card(
     });
     // Preview thumbnail (screenshots etc.) centered in its box left of
     // the text, which shifts right to make room.
-    let mut text_x = 18.0;
+    let text_x = text_origin(notification.image.is_some());
     if let Some((id, w, h)) = notification.image {
         let ix = 14.0 + (THUMB_MAX_W - w) / 2.0;
         let iy = top + (card_h - h) / 2.0;
         pc.image(id, Rect { x: ix, y: iy, width: w, height: h }, 1.0);
-        text_x = 14.0 + THUMB_MAX_W + 12.0;
     }
     // Use a configured (bundled) font family so glyph font-ids resolve in the
     // engine's render FontSystem — a bare default can pick a system font absent
@@ -231,14 +314,16 @@ fn draw_card(
     // The text column: from `text_x` (which the thumbnail may have pushed right)
     // to the card's right padding. Every label is bounded by it, so nothing runs
     // out over the plate's edge and rounded corner.
-    let text_w = NOTIF_WIDTH as f32 - text_x - CARD_PAD;
+    let text_w = body_wrap_width(notification.image.is_some());
     let column = |t: f32, b: f32| Some([text_x, top + t, text_x + text_w, top + b]);
     pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), column(8.0, BODY_TOP));
     pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), column(24.0, BODY_TOP));
     // The body word-wraps within that column instead of running off the card.
     // `box_height` is what bounds it: the engine lays boxed text out at a 1.4
-    // line height, so this admits three 11px lines (46.2 of 48) and shapes away
-    // the rest — a card is a fixed height and cannot grow to fit.
+    // line height, so this admits BODY_LINES 11px lines (46.2 of 48) and shapes
+    // away the rest — a card is a fixed height and cannot grow to fit. Anything
+    // longer was already cut to fit with an ellipsis by `fit_body` on arrival,
+    // so this bound is a backstop, not the truncation.
     pc.text_boxed(
         &notification.body,
         text_x,
@@ -267,6 +352,7 @@ struct Notification {
     id: u32,
     app_name: String,
     summary: String,
+    /// Already fitted to the card by [`fit_body`] on arrival — ellipsis and all.
     body: String,
     /// Uploaded preview image (id from `vk::upload_rgba`, logical w, h).
     image: Option<(u32, f32, f32)>,
@@ -350,6 +436,11 @@ impl Application for NotifierApp {
                     .map(|(pixels, w, h)| {
                         (cce_ui::vk::upload_rgba(pixels, w, h), w as f32, h as f32)
                     });
+                // Fit the body to the card once, here, rather than per frame:
+                // the column it wraps into depends on whether a thumbnail
+                // pushed the text right, which is settled by now.
+                let family = cce_ui::layout::statusbar_font_parsed().0;
+                let body = fit_body(&body, body_wrap_width(image.is_some()), Some(&family));
                 let fresh = Notification { id, app_name, summary, body, image, remaining: duration };
                 // A repeat of a live id (volume steps, download progress) refreshes that
                 // card where it sits rather than growing the stack.
@@ -564,4 +655,37 @@ impl DbusInterface {
 fn main() {
     env_logger::init();
     cce_ui::engine::run::<NotifierApp>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `BODY_LINES` restates the card's geometry, and `fit_body` trusts it to
+    /// decide where the ellipsis goes. If the card height, the body's top, or
+    /// its font size moves, this is what says so.
+    #[test]
+    fn body_lines_matches_the_card_geometry() {
+        let box_height = CARD_H as f32 - BODY_TOP - CARD_PAD_B;
+        let line_height = BODY_SIZE * 1.4; // the engine's boxed-text line height
+        assert!(
+            line_height * BODY_LINES as f32 <= box_height,
+            "BODY_LINES={BODY_LINES} needs {} of {box_height}",
+            line_height * BODY_LINES as f32
+        );
+        assert!(
+            line_height * (BODY_LINES + 1) as f32 > box_height,
+            "another line fits in {box_height} — BODY_LINES is too small"
+        );
+    }
+
+    /// A full stack has to land exactly on the surface the layer shell was
+    /// given, since that height is fixed at creation and cannot be renegotiated.
+    #[test]
+    fn a_full_stack_fits_the_surface() {
+        assert_eq!(
+            Notification::top(MAX_VISIBLE - 1) + CARD_H as f32,
+            NOTIF_HEIGHT as f32
+        );
+    }
 }
