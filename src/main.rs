@@ -31,6 +31,13 @@ const NOTIF_HEIGHT: u32 = MAX_VISIBLE as u32 * (CARD_H + CARD_GAP) - CARD_GAP;
 const THUMB_MAX_W: f32 = 100.0;
 const THUMB_MAX_H: f32 = 76.0;
 
+// The text column's right and bottom padding, and where the body starts. The
+// body gets whatever is left of the card below `BODY_TOP`.
+const CARD_PAD: f32 = 14.0;
+const CARD_PAD_B: f32 = 6.0;
+const BODY_TOP: f32 = 46.0;
+const BODY_SIZE: f32 = 11.0;
+
 #[derive(Debug, Clone)]
 enum UserEvent {
     NewNotification {
@@ -221,9 +228,33 @@ fn draw_card(
     // from the engine's bundled-only database.
     let family = cce_ui::layout::statusbar_font_parsed().0;
     let font = Some(family);
-    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), None);
-    pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), None);
-    pc.text_with(&notification.body, text_x, top + 48.0, 11.0, srgb_u8(cce_ui::colors::TEXT_FG), font, None);
+    // The text column: from `text_x` (which the thumbnail may have pushed right)
+    // to the card's right padding. Every label is bounded by it, so nothing runs
+    // out over the plate's edge and rounded corner.
+    let text_w = NOTIF_WIDTH as f32 - text_x - CARD_PAD;
+    let column = |t: f32, b: f32| Some([text_x, top + t, text_x + text_w, top + b]);
+    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), column(8.0, BODY_TOP));
+    pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), column(24.0, BODY_TOP));
+    // The body word-wraps within that column instead of running off the card.
+    // `box_height` is what bounds it: the engine lays boxed text out at a 1.4
+    // line height, so this admits three 11px lines (46.2 of 48) and shapes away
+    // the rest — a card is a fixed height and cannot grow to fit.
+    pc.text_boxed(
+        &notification.body,
+        text_x,
+        top + BODY_TOP,
+        BODY_SIZE,
+        srgb_u8(cce_ui::colors::TEXT_FG),
+        font,
+        column(BODY_TOP, card_h - CARD_PAD_B),
+        cce_ui::scene::paint::TextAttrs::default(),
+        cce_ui::scene::paint::TextLayout {
+            wrap_width: Some(text_w),
+            box_height: card_h - BODY_TOP - CARD_PAD_B,
+            align_h: cce_ui::scene::paint::AlignH::Left,
+            align_v: cce_ui::scene::paint::AlignV::Top,
+        },
+    );
 }
 
 // ── Application ───────────────────────────────────────────────────────────
