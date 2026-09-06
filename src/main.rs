@@ -85,9 +85,7 @@ fn read_duration() -> f32 {
 /// The notification plate style: per-app `plate { }` keys from
 /// `~/.config/cce/cce-notifier/config.kdl` (merged over the global config by
 /// `parse_kdl_to_json`), falling back to the shared `style.surface.plate`
-/// values for anything unset. `backplate { }` is accepted as a read-alias for
-/// configs written before the plate vocabulary settled (cce-ui RFC Phase 7a);
-/// `plate` wins when both are present.
+/// values for anything unset.
 struct PlateStyle {
     fill: [f32; 4],
     border: Option<([f32; 4], f32)>,
@@ -98,11 +96,7 @@ struct PlateStyle {
 
 fn read_plate_style() -> PlateStyle {
     let cfg = cce_ui::config::cached_config();
-    // Canonical-first: `/plate/<key>`, then the legacy `/backplate/<key>`.
-    let key = |name: &str| {
-        cfg.pointer(&format!("/plate/{name}"))
-            .or_else(|| cfg.pointer(&format!("/backplate/{name}")))
-    };
+    let key = |name: &str| cfg.pointer(&format!("/plate/{name}"));
     let f32_key = |name: &str, default: f32| {
         key(name).and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default)
     };
