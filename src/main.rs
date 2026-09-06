@@ -82,10 +82,12 @@ fn read_duration() -> f32 {
     cce_ui::config::get_i64("/notifications/duration", 5) as f32
 }
 
-/// The notification backplate style: per-app `backplate { }` keys from
+/// The notification plate style: per-app `plate { }` keys from
 /// `~/.config/cce/cce-notifier/config.kdl` (merged over the global config by
 /// `parse_kdl_to_json`), falling back to the shared `style.surface.plate`
-/// values for anything unset.
+/// values for anything unset. `backplate { }` is accepted as a read-alias for
+/// configs written before the plate vocabulary settled (cce-ui RFC Phase 7a);
+/// `plate` wins when both are present.
 struct PlateStyle {
     fill: [f32; 4],
     border: Option<([f32; 4], f32)>,
@@ -95,14 +97,23 @@ struct PlateStyle {
 }
 
 fn read_plate_style() -> PlateStyle {
+    let cfg = cce_ui::config::cached_config();
+    // Canonical-first: `/plate/<key>`, then the legacy `/backplate/<key>`.
+    let key = |name: &str| {
+        cfg.pointer(&format!("/plate/{name}"))
+            .or_else(|| cfg.pointer(&format!("/backplate/{name}")))
+    };
+    let f32_key = |name: &str, default: f32| {
+        key(name).and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default)
+    };
     // Shared plate colors are stored linear (color.rs gamma-corrects on load),
     // so the override keys parse linear too.
-    let linear = |ptr: &str| {
-        cce_ui::config::get_string(ptr)
-            .as_deref()
+    let linear = |name: &str| {
+        key(name)
+            .and_then(|v| v.as_str())
             .and_then(cce_ui::color::parse_hex_rgba_linear)
     };
-    let fill = linear("/backplate/color")
+    let fill = linear("color")
         .or_else(cce_ui::colors::plate_color)
         .unwrap_or([
             cce_ui::colors::srgb_to_linear(0.08),
@@ -110,25 +121,16 @@ fn read_plate_style() -> PlateStyle {
             cce_ui::colors::srgb_to_linear(0.12),
             1.0,
         ]);
-    let border = linear("/backplate/border_color")
+    let border = linear("border_color")
         .or_else(cce_ui::colors::plate_border_color)
-        .map(|c| {
-            let t = cce_ui::config::get_f32(
-                "/backplate/border_thickness",
-                cce_ui::colors::plate_border_thickness(),
-            );
-            (c, t)
-        })
+        .map(|c| (c, f32_key("border_thickness", cce_ui::colors::plate_border_thickness())))
         .filter(|&(_, t)| t > 0.0);
     PlateStyle {
         fill,
         border,
-        radius: cce_ui::config::get_f32(
-            "/backplate/corner_radius",
-            cce_ui::layout::plate_corner_radius(),
-        ),
-        blur: cce_ui::config::get_bool("/backplate/blur", cce_ui::colors::plate_blur()),
-        opacity: cce_ui::config::get_f32("/backplate/opacity", cce_ui::layout::plate_opacity()),
+        radius: f32_key("corner_radius", cce_ui::layout::plate_corner_radius()),
+        blur: key("blur").and_then(|v| v.as_bool()).unwrap_or_else(cce_ui::colors::plate_blur),
+        opacity: f32_key("opacity", cce_ui::layout::plate_opacity()),
     }
 }
 
@@ -274,7 +276,7 @@ fn draw_card(
 ) {
     use cce_ui::scene::layout::Rect;
     let card_h = CARD_H as f32;
-    // The backplate (per-app `backplate { }` keys over the shared plate style;
+    // The plate (per-app `plate { }` keys over the shared plate style;
     // blur via the negative-alpha marker), replacing the old clear-color background.
     let surface = Rect { x: 0.0, y: top, width: NOTIF_WIDTH as f32, height: card_h };
     let radius = plate.radius;
@@ -338,7 +340,7 @@ fn draw_card(
 
 // ── Application ───────────────────────────────────────────────────────────
 //
-// Phase 6 shape: the whole frame — backplate and text — is one display list
+// Phase 6 shape: the whole frame — plate and text — is one display list
 // (`display_list` + `display_list_text`); the engine shapes the text through the shared
 // buffer cache. No app-side FontSystem, TextItem cache, or rebuild bookkeeping.
 
@@ -478,7 +480,7 @@ impl Application for NotifierApp {
         }
     }
 
-    /// The whole frame as one display list (Phase 6): the backplate plus the three
+    /// The whole frame as one display list (Phase 6): the plate plus the three
     /// text lines. Coordinates are logical px; the engine applies HiDPI scale and shapes the
     /// text through its shared buffer cache.
     fn display_list(&mut self, _size: cce_ui::engine::LogicalSize, _scale: f64) -> Option<cce_ui::scene::paint::DisplayList> {
