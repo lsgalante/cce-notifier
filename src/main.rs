@@ -292,12 +292,6 @@ fn draw_card(
             pc.rounded_rect(surface, radius, (on, on, on, on), fill);
         }
     }
-    pc.clip_rounded(surface, radius, |pc| {
-        pc.quad(
-            Rect { x: 0.0, y: top, width: 6.0, height: card_h },
-            cce_ui::colors::TOGGLE_ON,
-        );
-    });
     // Preview thumbnail (screenshots etc.) centered in its box left of
     // the text, which shifts right to make room.
     let text_x = text_origin(notification.image.is_some());
@@ -344,7 +338,7 @@ fn draw_card(
 
 // ── Application ───────────────────────────────────────────────────────────
 //
-// Phase 6 shape: the whole frame — accent quad and text — is one display list
+// Phase 6 shape: the whole frame — backplate and text — is one display list
 // (`display_list` + `display_list_text`); the engine shapes the text through the shared
 // buffer cache. No app-side FontSystem, TextItem cache, or rebuild bookkeeping.
 
@@ -484,7 +478,7 @@ impl Application for NotifierApp {
         }
     }
 
-    /// The whole frame as one display list (Phase 6): the green accent border plus the three
+    /// The whole frame as one display list (Phase 6): the backplate plus the three
     /// text lines. Coordinates are logical px; the engine applies HiDPI scale and shapes the
     /// text through its shared buffer cache.
     fn display_list(&mut self, _size: cce_ui::engine::LogicalSize, _scale: f64) -> Option<cce_ui::scene::paint::DisplayList> {
