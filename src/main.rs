@@ -346,9 +346,16 @@ struct Notification {
     body: String,
     /// Uploaded preview image (id from `vk::upload_rgba`, logical w, h).
     image: Option<(u32, f32, f32)>,
-    /// Seconds left on screen. Only counts down while the card is displayed,
-    /// so a queued notification does not expire before it is ever shown.
-    remaining: f32,
+    /// Seconds the card is asked to stay up once it is displayed.
+    duration: f32,
+    /// When the card comes down, set on the first tick it is displayed — so a
+    /// queued notification does not expire before it is ever shown. A wall
+    /// clock, deliberately, not an accumulation of the runner's `dt`: `dt` is
+    /// animation time, clamped to one frame after an idle sleep, and a card
+    /// whose only reason to redraw is its own expiry never leaves that sleep.
+    /// Ageing it by `dt` ran the countdown at 1/60 speed — a 5 s toast sat on
+    /// screen for five minutes.
+    expires_at: Option<std::time::Instant>,
 }
 
 impl Notification {
@@ -431,7 +438,7 @@ impl Application for NotifierApp {
                 // pushed the text right, which is settled by now.
                 let family = cce_ui::layout::statusbar_font_parsed().0;
                 let body = fit_body(&body, body_wrap_width(image.is_some()), Some(&family));
-                let fresh = Notification { id, app_name, summary, body, image, remaining: duration };
+                let fresh = Notification { id, app_name, summary, body, image, duration, expires_at: None };
                 // A repeat of a live id (volume steps, download progress) refreshes that
                 // card where it sits rather than growing the stack.
                 match self.stack.iter().position(|n| n.id == id) {
@@ -453,17 +460,19 @@ impl Application for NotifierApp {
         }
     }
 
-    fn tick(&mut self, dt: f32, needs_rebuild: &mut bool) {
+    fn tick(&mut self, _dt: f32, needs_rebuild: &mut bool) {
         // Only displayed cards age; queued ones keep their full duration and
-        // start counting when a slot frees up.
+        // start counting on the first tick after a slot frees up.
+        let now = std::time::Instant::now();
         let visible = self.visible_count();
         for n in &mut self.stack[..visible] {
-            n.remaining -= dt;
+            let deadline = now + std::time::Duration::from_secs_f32(n.duration);
+            n.expires_at.get_or_insert(deadline);
         }
         let before = self.stack.len();
         let mut i = 0;
         while i < self.stack.len() {
-            if self.stack[i].remaining <= 0.0 {
+            if self.stack[i].expires_at.is_some_and(|t| now >= t) {
                 self.stack.remove(i).free_image();
             } else {
                 i += 1;
@@ -472,6 +481,14 @@ impl Application for NotifierApp {
         if self.stack.len() != before {
             *needs_rebuild = true;
         }
+    }
+
+    /// A live card's only pending work is its own expiry, which the runner
+    /// cannot see: nothing redraws, so the loop parks on the default idle
+    /// sleep and the card outstays its welcome by up to a second. Poll while
+    /// the stack is occupied, and go fully idle the moment it empties.
+    fn idle_poll_interval(&self) -> Option<std::time::Duration> {
+        (!self.stack.is_empty()).then(|| std::time::Duration::from_millis(100))
     }
 
     /// The whole frame as one display list (Phase 6): the plate plus the three
