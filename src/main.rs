@@ -346,6 +346,13 @@ struct Notification {
     body: String,
     /// Uploaded preview image (id from `vk::upload_rgba`, logical w, h).
     image: Option<(u32, f32, f32)>,
+    /// Where [`image`] was decoded from, kept so the card can be re-uploaded
+    /// into a replacement renderer — see `NotifierApp::renderer_init`. `None`
+    /// when the notification carried no image, or when its file would not
+    /// decode.
+    ///
+    /// [`image`]: Notification::image
+    image_path: Option<String>,
     /// Seconds the card is asked to stay up once it is displayed.
     duration: f32,
     /// When the card comes down, set on the first tick it is displayed — so a
@@ -365,12 +372,35 @@ impl Notification {
         }
     }
 
+    /// Re-decode and re-upload the thumbnail against the current renderer.
+    ///
+    /// The stale id is freed first (a free for an id the new renderer never
+    /// had is a no-op), and a file that has since gone away simply leaves the
+    /// card imageless rather than drawing nothing in a reserved box.
+    fn reupload_image(&mut self) {
+        self.free_image();
+        let Some(path) = self.image_path.clone() else { return };
+        match load_thumbnail(&path) {
+            Some((pixels, w, h)) => {
+                self.image = Some((cce_ui::vk::upload_rgba(pixels, w, h), w as f32, h as f32));
+            }
+            None => {
+                log::warn!("[notifier] {path} no longer decodes; the card keeps its text");
+                self.image_path = None;
+            }
+        }
+    }
+
     fn top(index: usize) -> f32 {
         index as f32 * (CARD_H + CARD_GAP) as f32
     }
 }
 
 struct NotifierApp {
+    /// Whether a renderer has been handed over yet — the first one is the
+    /// process's own, any later one is a replacement after a reconnect. See
+    /// `renderer_init`.
+    seen_renderer: bool,
     /// Live notifications, oldest first. The first `MAX_VISIBLE` are drawn top-down
     /// (so a new one appears below the ones already being read, and cards below an
     /// expiring one slide up); the rest wait their turn.
@@ -390,6 +420,7 @@ impl Application for NotifierApp {
 
     fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
         Self {
+            seen_renderer: false,
             stack: Vec::new(),
             plate: read_plate_style(),
             sender,
@@ -438,7 +469,19 @@ impl Application for NotifierApp {
                 // pushed the text right, which is settled by now.
                 let family = cce_ui::layout::statusbar_font_parsed().0;
                 let body = fit_body(&body, body_wrap_width(image.is_some()), Some(&family));
-                let fresh = Notification { id, app_name, summary, body, image, duration, expires_at: None };
+                let fresh = Notification {
+                    id,
+                    app_name,
+                    summary,
+                    body,
+                    // Only a path that actually produced a texture: an
+                    // unreadable one must not make the re-upload retry it on
+                    // every reconnect.
+                    image_path: image.is_some().then_some(image_path).flatten(),
+                    image,
+                    duration,
+                    expires_at: None,
+                };
                 // A repeat of a live id (volume steps, download progress) refreshes that
                 // card where it sits rather than growing the stack.
                 match self.stack.iter().position(|n| n.id == id) {
@@ -480,6 +523,38 @@ impl Application for NotifierApp {
         }
         if self.stack.len() != before {
             *needs_rebuild = true;
+        }
+    }
+
+    /// Re-upload every live card's thumbnail when the renderer is replaced.
+    ///
+    /// A card holds a **renderer** image id, and a renderer does not outlive
+    /// its session: `cce-ui`'s `window_runner` repairs a lost Wayland
+    /// transport by opening a new session around the same `Application`, which
+    /// rebuilds the renderer and with it the image table. The cached id then
+    /// names an image that no longer exists, and a draw for an unknown id is
+    /// skipped rather than reported — so a card that was on screen across the
+    /// reconnect came back with its text and an empty thumbnail box, and would
+    /// stay that way for the rest of its life, since a card's image is
+    /// uploaded once on arrival and never again.
+    ///
+    /// The layer surface outlives every card, so this is not a
+    /// once-at-startup concern: the stack is whatever happened to be up when
+    /// the transport broke.
+    ///
+    /// Not on the first renderer: no card can exist yet — the D-Bus server is
+    /// only started after the app is built, and its uploads are queued for
+    /// precisely that renderer.
+    fn renderer_init(&mut self, _renderer: &mut cce_ui::vk::VkRenderer) {
+        if !std::mem::replace(&mut self.seen_renderer, true) {
+            return;
+        }
+        let with_images = self.stack.iter().filter(|n| n.image.is_some()).count();
+        if with_images > 0 {
+            log::info!("[notifier] renderer replaced; re-uploading {with_images} card thumbnail(s)");
+        }
+        for n in &mut self.stack {
+            n.reupload_image();
         }
     }
 
