@@ -569,6 +569,7 @@ impl Application for NotifierApp {
     /// The whole frame as one display list (Phase 6): the plate plus the three
     /// text lines. Coordinates are logical px; the engine applies HiDPI scale and shapes the
     /// text through its shared buffer cache.
+    // style-audit: opt-out a transparent surface; each notification card is its own plate
     fn display_list(&mut self, _size: cce_ui::engine::LogicalSize, _scale: f64) -> Option<cce_ui::scene::paint::DisplayList> {
         use cce_ui::scene::paint::PaintCtx;
         let mut pc = PaintCtx::new();
