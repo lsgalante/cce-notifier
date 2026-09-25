@@ -418,6 +418,13 @@ impl NotifierApp {
 impl Application for NotifierApp {
     type Message = UserEvent;
 
+    /// A systemd user service the compositor does not restore: it waits for
+    /// the next compositor rather than exiting, so org.freedesktop.Notifications
+    /// stays owned across a logout or a compositor restart.
+    fn outlives_compositor(&self) -> bool {
+        true
+    }
+
     fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
         Self {
             seen_renderer: false,
