@@ -415,7 +415,7 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=78b194c4a5f578ff798272fe8203e20324b32426#78b194c4a5f578ff798272fe8203e20324b32426"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=80a2798ae267a78a3d387f8729f901ad8f92a7d4#80a2798ae267a78a3d387f8729f901ad8f92a7d4"
 dependencies = [
  "ash",
  "bitflags 2.13.1",
