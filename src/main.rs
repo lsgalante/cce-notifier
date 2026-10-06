@@ -23,7 +23,8 @@ const MAX_VISIBLE: usize = 5;
 /// A layer surface's size is fixed at creation (the cce-ui engine has no
 /// runtime resize for one), so the surface is always tall enough for a full
 /// stack and the unused part is left transparent — and click-through, via the
-/// per-card `input_regions` below.
+/// per-card `input_regions` below. With no card up there is no surface at all
+/// (`wants_surface`).
 const NOTIF_HEIGHT: u32 = MAX_VISIBLE as u32 * (CARD_H + CARD_GAP) - CARD_GAP;
 
 // Image previews (the freedesktop `image-path` hint, e.g. screenshots) fit
@@ -401,6 +402,10 @@ struct NotifierApp {
     /// process's own, any later one is a replacement after a reconnect. See
     /// `renderer_init`.
     seen_renderer: bool,
+    /// The runner dropped the surface and renderer because the stack emptied
+    /// (`surface_hidden`), so every thumbnail uploaded since is queued for the
+    /// renderer that comes next — `renderer_init` must not re-upload it.
+    hidden_since_renderer: bool,
     /// Live notifications, oldest first. The first `MAX_VISIBLE` are drawn top-down
     /// (so a new one appears below the ones already being read, and cards below an
     /// expiring one slide up); the rest wait their turn.
@@ -428,6 +433,7 @@ impl Application for NotifierApp {
     fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
         Self {
             seen_renderer: false,
+            hidden_since_renderer: false,
             stack: Vec::new(),
             plate: read_plate_style(),
             sender,
@@ -556,6 +562,12 @@ impl Application for NotifierApp {
         if !std::mem::replace(&mut self.seen_renderer, true) {
             return;
         }
+        // Mapped again after an empty spell: the cards on the stack arrived
+        // after the old renderer was dropped, and their uploads are already
+        // queued for this one.
+        if std::mem::replace(&mut self.hidden_since_renderer, false) {
+            return;
+        }
         let with_images = self.stack.iter().filter(|n| n.image.is_some()).count();
         if with_images > 0 {
             log::info!("[notifier] renderer replaced; re-uploading {with_images} card thumbnail(s)");
@@ -567,10 +579,32 @@ impl Application for NotifierApp {
 
     /// A live card's only pending work is its own expiry, which the runner
     /// cannot see: nothing redraws, so the loop parks on the default idle
-    /// sleep and the card outstays its welcome by up to a second. Poll while
-    /// the stack is occupied, and go fully idle the moment it empties.
+    /// sleep and the card outstays its welcome by up to a second. Sleep until
+    /// the soonest displayed card is due (it was a flat 100 ms poll until
+    /// 2026-10-05), and go fully idle the moment the stack empties. A card
+    /// not yet stamped by `tick` gets its deadline on the next turn.
     fn idle_poll_interval(&self) -> Option<std::time::Duration> {
-        (!self.stack.is_empty()).then(|| std::time::Duration::from_millis(100))
+        if self.stack.is_empty() {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        let soonest = self.stack[..self.visible_count()]
+            .iter()
+            .map(|n| n.expires_at.map_or(std::time::Duration::ZERO, |t| t.saturating_duration_since(now)))
+            .min()
+            .unwrap_or(std::time::Duration::ZERO);
+        Some(soonest.max(std::time::Duration::from_millis(10)))
+    }
+
+    /// Mapped only while a card is up: an empty, transparent overlay still
+    /// made the compositor blur behind it whenever anything under the corner
+    /// changed, and kept fullscreen clients off direct scanout.
+    fn wants_surface(&self) -> bool {
+        !self.stack.is_empty()
+    }
+
+    fn surface_hidden(&mut self) {
+        self.hidden_since_renderer = true;
     }
 
     /// The whole frame as one display list (Phase 6): the plate plus the three
