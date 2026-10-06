@@ -415,7 +415,7 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=c3b7648eec0d96b3d30e8ae1aa1d4e27e912205d#c3b7648eec0d96b3d30e8ae1aa1d4e27e912205d"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=005532b14ca0773cd869b4765322928f6bab3207#005532b14ca0773cd869b4765322928f6bab3207"
 dependencies = [
  "ash",
  "bitflags 2.13.1",
@@ -922,14 +922,14 @@ checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
 
 [[package]]
 name = "gpu-allocator"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c151a2a5ef800297b4e79efa4f4bec035c5f51d5ae587287c9b952bdf734cacd"
+checksum = "51255ea7cfaadb6c5f1528d43e92a82acb2b96c43365989a28b2d44ee38f8795"
 dependencies = [
  "ash",
  "log",
  "presser",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
