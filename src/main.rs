@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use zbus::zvariant::Value;
 use zbus::{connection, interface};
 
-use wayland_client::QueueHandle;
 
 use cce_ui::engine::{
     Application, EngineState, LayerAnchor, LayerKeyboardInteractivity, LayerKind, LayerSettings,
@@ -605,7 +604,9 @@ impl Application for NotifierApp {
         true
     }
 
-    fn new(_qh: &QueueHandle<EngineState<Self>>, sender: calloop::channel::Sender<Self::Message>) -> Self {
+    fn create(sender: cce_ui::engine::AppSender<Self::Message>) -> Self {
+        // The app keeps calloop's sender; `AppSender` converts into it.
+        let sender: calloop::channel::Sender<Self::Message> = sender.into();
         Self {
             seen_renderer: false,
             hidden_since_renderer: false,
