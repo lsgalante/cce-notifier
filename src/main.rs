@@ -32,6 +32,29 @@ const NOTIF_HEIGHT: u32 = MAX_VISIBLE as u32 * (CARD_H + CARD_GAP) - CARD_GAP;
 const THUMB_MAX_W: f32 = 100.0;
 const THUMB_MAX_H: f32 = 76.0;
 
+/// An app icon (the `app_icon` argument as a theme name or path) is drawn in
+/// this square instead of the thumbnail box, rasterized at twice its size so
+/// it stays sharp at output scale 2.
+const ICON_BOX: f32 = 48.0;
+const ICON_RASTER_PX: u32 = 96;
+
+/// Action buttons ride the header row, right-aligned, so a card with actions
+/// keeps all three body lines.
+const ACTION_H: f32 = 18.0;
+const ACTION_TOP: f32 = 6.0;
+const ACTION_GAP: f32 = 6.0;
+const ACTION_FONT: f32 = 10.0;
+const ACTION_PAD_X: f32 = 8.0;
+/// At most this many buttons, and labels cut to this many chars: the header
+/// row is the card's width, and the app name needs some of it.
+const MAX_ACTIONS: usize = 3;
+const ACTION_LABEL_MAX: usize = 14;
+
+/// `NotificationClosed` reasons (the spec's numbering).
+const CLOSED_EXPIRED: u32 = 1;
+const CLOSED_DISMISSED: u32 = 2;
+const CLOSED_BY_CALL: u32 = 3;
+
 // The text column's right and bottom padding, and where the body starts. The
 // body gets whatever is left of the card below `BODY_TOP`.
 const CARD_PAD: f32 = 14.0;
@@ -45,18 +68,78 @@ const BODY_SIZE: f32 = 11.0;
 /// in the tests below so the two cannot drift.
 const BODY_LINES: usize = 3;
 
-/// Where the text column starts: the thumbnail pushes it right of the image box.
-fn text_origin(has_image: bool) -> f32 {
-    if has_image {
-        14.0 + THUMB_MAX_W + 12.0
-    } else {
-        18.0
+/// The image a card shows left of its text, and so how far the text moves.
+#[derive(Debug, Clone, PartialEq)]
+enum ImageSource {
+    /// A preview file (`image-path`): PNG, fit to the thumbnail box.
+    Thumbnail(String),
+    /// The app's icon (`app_icon`): a theme name or a path, SVG or PNG,
+    /// resolved by `cce_ui::icon` and drawn in the icon square.
+    Icon(String),
+}
+
+impl ImageSource {
+    fn box_w(&self) -> f32 {
+        match self {
+            ImageSource::Thumbnail(_) => THUMB_MAX_W,
+            ImageSource::Icon(_) => ICON_BOX,
+        }
+    }
+
+    /// Decode and upload against the current renderer: (image id, logical
+    /// w, h), fit to this source's box. `None` when nothing decodes.
+    fn upload(&self) -> Option<(u32, f32, f32)> {
+        match self {
+            ImageSource::Thumbnail(path) => load_thumbnail(path)
+                .map(|(pixels, w, h)| (cce_ui::vk::upload_rgba(pixels, w, h), w as f32, h as f32)),
+            ImageSource::Icon(name) => {
+                let (id, w, h) = cce_ui::icon::upload_themed(name, ICON_RASTER_PX)?;
+                let fit = ICON_BOX / w.max(h).max(1) as f32;
+                Some((id, w as f32 * fit, h as f32 * fit))
+            }
+        }
+    }
+}
+
+/// Where the text column starts: an image pushes it right of the image's box.
+fn text_origin(image_box: Option<f32>) -> f32 {
+    match image_box {
+        Some(w) => 14.0 + w + 12.0,
+        None => 18.0,
     }
 }
 
 /// The column the body wraps into — origin to the card's right padding.
-fn body_wrap_width(has_image: bool) -> f32 {
-    NOTIF_WIDTH as f32 - text_origin(has_image) - CARD_PAD
+fn body_wrap_width(image_box: Option<f32>) -> f32 {
+    NOTIF_WIDTH as f32 - text_origin(image_box) - CARD_PAD
+}
+
+/// A button's label as drawn: cut with an ellipsis past [`ACTION_LABEL_MAX`].
+fn action_label(label: &str) -> String {
+    if label.chars().count() <= ACTION_LABEL_MAX {
+        return label.to_string();
+    }
+    let mut s: String = label.chars().take(ACTION_LABEL_MAX - 1).collect();
+    s.truncate(s.trim_end().len());
+    s.push('…');
+    s
+}
+
+/// Each button's x and width, right-aligned on the header row, for labels
+/// measuring `widths` (already label text widths). Right to left in input
+/// order would reverse them, so the row is laid out left to right from its
+/// start.
+fn action_layout(widths: &[f32]) -> Vec<(f32, f32)> {
+    let ws: Vec<f32> = widths.iter().map(|w| w + 2.0 * ACTION_PAD_X).collect();
+    let total: f32 = ws.iter().sum::<f32>() + ACTION_GAP * ws.len().saturating_sub(1) as f32;
+    let mut x = NOTIF_WIDTH as f32 - CARD_PAD - total;
+    ws.iter()
+        .map(|&w| {
+            let at = (x, w);
+            x += w + ACTION_GAP;
+            at
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -68,9 +151,13 @@ enum UserEvent {
         app_name: String,
         summary: String,
         body: String,
-        image_path: Option<String>,
-        /// Seconds, already resolved from the client's `expire_timeout`.
-        duration: f32,
+        image: Option<ImageSource>,
+        /// `(key, label)` pairs from the `actions` argument. `default` is the
+        /// click on the card itself; the rest become buttons.
+        actions: Vec<(String, String)>,
+        /// Seconds, already resolved from the client's `expire_timeout` and
+        /// urgency; `None` stays until it is clicked or closed.
+        duration: Option<f32>,
     },
     CloseNotification {
         id: u32,
@@ -289,11 +376,12 @@ fn draw_card(
             pc.rounded_rect(surface, radius, (on, on, on, on), fill);
         }
     }
-    // Preview thumbnail (screenshots etc.) centered in its box left of
-    // the text, which shifts right to make room.
-    let text_x = text_origin(notification.image.is_some());
-    if let Some((id, w, h)) = notification.image {
-        let ix = 14.0 + (THUMB_MAX_W - w) / 2.0;
+    // Preview thumbnail (screenshots etc.) or app icon, centered in its box
+    // left of the text, which shifts right to make room.
+    let image_box = notification.image_box();
+    let text_x = text_origin(image_box);
+    if let (Some((id, w, h)), Some(box_w)) = (notification.image, image_box) {
+        let ix = 14.0 + (box_w - w) / 2.0;
         let iy = top + (card_h - h) / 2.0;
         pc.image(id, Rect { x: ix, y: iy, width: w, height: h }, 1.0);
     }
@@ -305,9 +393,27 @@ fn draw_card(
     // The text column: from `text_x` (which the thumbnail may have pushed right)
     // to the card's right padding. Every label is bounded by it, so nothing runs
     // out over the plate's edge and rounded corner.
-    let text_w = body_wrap_width(notification.image.is_some());
+    let text_w = body_wrap_width(image_box);
     let column = |t: f32, b: f32| Some([text_x, top + t, text_x + text_w, top + b]);
-    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), column(8.0, BODY_TOP));
+    // The buttons share the header row with the app name, which stops short
+    // of the first one.
+    let buttons = notification.action_rects(top);
+    let name_right = buttons.first().map_or(text_x + text_w, |(r, _)| r.x - ACTION_GAP);
+    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), Some([text_x, top + 8.0, name_right, top + BODY_TOP]));
+    for (i, (rect, label)) in buttons.iter().enumerate() {
+        let hovered = notification.hovered_action == Some(i);
+        let wash = if hovered { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] };
+        pc.rounded_rect(*rect, ACTION_H / 2.0, (true, true, true, true), wash);
+        pc.text_with(
+            label,
+            rect.x + ACTION_PAD_X,
+            rect.y + (ACTION_H - ACTION_FONT) / 2.0 - 1.0,
+            ACTION_FONT,
+            srgb_u8(cce_ui::colors::TEXT_FG),
+            font.clone(),
+            Some([rect.x, rect.y, rect.x + rect.width, rect.y + rect.height]),
+        );
+    }
     pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), column(24.0, BODY_TOP));
     // The body word-wraps within that column instead of running off the card.
     // `box_height` is what bounds it: the engine lays boxed text out at a 1.4
@@ -349,13 +455,19 @@ struct Notification {
     image: Option<(u32, f32, f32)>,
     /// Where [`image`] was decoded from, kept so the card can be re-uploaded
     /// into a replacement renderer — see `NotifierApp::renderer_init`. `None`
-    /// when the notification carried no image, or when its file would not
-    /// decode.
+    /// when the notification carried no image, or when it would not decode.
     ///
     /// [`image`]: Notification::image
-    image_path: Option<String>,
-    /// Seconds the card is asked to stay up once it is displayed.
-    duration: f32,
+    image_source: Option<ImageSource>,
+    /// The click on the card answers `default` when the client offered it.
+    has_default: bool,
+    /// Button `(key, label as drawn)`, at most [`MAX_ACTIONS`].
+    actions: Vec<(String, String)>,
+    /// The button under the pointer, for its hover wash.
+    hovered_action: Option<usize>,
+    /// Seconds the card is asked to stay up once it is displayed; `None`
+    /// stays until clicked or closed (critical urgency, `expire_timeout` 0).
+    duration: Option<f32>,
     /// When the card comes down, set on the first tick it is displayed — so a
     /// queued notification does not expire before it is ever shown. A wall
     /// clock, deliberately, not an accumulation of the runner's `dt`: `dt` is
@@ -380,16 +492,41 @@ impl Notification {
     /// card imageless rather than drawing nothing in a reserved box.
     fn reupload_image(&mut self) {
         self.free_image();
-        let Some(path) = self.image_path.clone() else { return };
-        match load_thumbnail(&path) {
-            Some((pixels, w, h)) => {
-                self.image = Some((cce_ui::vk::upload_rgba(pixels, w, h), w as f32, h as f32));
-            }
+        let Some(source) = self.image_source.clone() else { return };
+        match source.upload() {
+            Some(image) => self.image = Some(image),
             None => {
-                log::warn!("[notifier] {path} no longer decodes; the card keeps its text");
-                self.image_path = None;
+                log::warn!("[notifier] {source:?} no longer decodes; the card keeps its text");
+                self.image_source = None;
             }
         }
+    }
+
+    /// The text column's image box, when an image actually decoded.
+    fn image_box(&self) -> Option<f32> {
+        self.image.and(self.image_source.as_ref()).map(ImageSource::box_w)
+    }
+
+    /// Each button's rect on a card whose top is `top`, with its label.
+    /// Paint and the click both come through here, so the drawn button is
+    /// the one a press lands on.
+    fn action_rects(&self, top: f32) -> Vec<(cce_ui::scene::layout::Rect, String)> {
+        if self.actions.is_empty() {
+            return Vec::new();
+        }
+        let family = cce_ui::layout::statusbar_font_parsed().0;
+        let widths: Vec<f32> = self
+            .actions
+            .iter()
+            .map(|(_, label)| cce_ui::widget::display::measure_text_width(label, &family, ACTION_FONT))
+            .collect();
+        action_layout(&widths)
+            .into_iter()
+            .zip(&self.actions)
+            .map(|((x, w), (_, label))| {
+                (cce_ui::scene::layout::Rect { x, y: top + ACTION_TOP, width: w, height: ACTION_H }, label.clone())
+            })
+            .collect()
     }
 
     fn top(index: usize) -> f32 {
@@ -412,11 +549,49 @@ struct NotifierApp {
     stack: Vec<Notification>,
     plate: PlateStyle,
     sender: calloop::channel::Sender<UserEvent>,
+    /// To the D-Bus thread, which emits `ActionInvoked` / `NotificationClosed`.
+    /// Set in `register_sources`, where that thread starts.
+    signals: Option<tokio::sync::mpsc::UnboundedSender<Signal>>,
+}
+
+/// What the UI tells the D-Bus thread to announce.
+#[derive(Debug)]
+enum Signal {
+    ActionInvoked(u32, String),
+    Closed(u32, u32),
 }
 
 impl NotifierApp {
     fn visible_count(&self) -> usize {
         self.stack.len().min(MAX_VISIBLE)
+    }
+
+    fn signal(&self, signal: Signal) {
+        if let Some(tx) = &self.signals {
+            let _ = tx.send(signal);
+        }
+    }
+
+    /// The displayed card under `y` (surface-local), if any.
+    fn card_at(&self, y: f32) -> Option<usize> {
+        let i = (y / (CARD_H + CARD_GAP) as f32).floor();
+        if i < 0.0 {
+            return None;
+        }
+        let i = i as usize;
+        let within = y - Notification::top(i) <= CARD_H as f32;
+        (i < self.visible_count() && within).then_some(i)
+    }
+
+    /// Take card `i` down, answering `action` first when there is one — the
+    /// spec's order: ActionInvoked, then NotificationClosed.
+    fn take_down(&mut self, i: usize, action: Option<String>) {
+        let mut card = self.stack.remove(i);
+        if let Some(key) = action {
+            self.signal(Signal::ActionInvoked(card.id, key));
+        }
+        self.signal(Signal::Closed(card.id, CLOSED_DISMISSED));
+        card.free_image();
     }
 }
 
@@ -437,6 +612,7 @@ impl Application for NotifierApp {
             stack: Vec::new(),
             plate: read_plate_style(),
             sender,
+            signals: None,
         }
     }
 
@@ -469,29 +645,36 @@ impl Application for NotifierApp {
 
     fn update(&mut self, msg: Self::Message, needs_rebuild: &mut bool, _exit: &mut bool) {
         match msg {
-            UserEvent::NewNotification { id, app_name, summary, body, image_path, duration } => {
+            UserEvent::NewNotification { id, app_name, summary, body, image, actions, duration } => {
                 play_bell_if_configured();
-                let image = image_path
-                    .as_deref()
-                    .and_then(load_thumbnail)
-                    .map(|(pixels, w, h)| {
-                        (cce_ui::vk::upload_rgba(pixels, w, h), w as f32, h as f32)
-                    });
+                let uploaded = image.as_ref().and_then(ImageSource::upload);
+                // Only a source that actually produced a texture: an
+                // unreadable one must not make the re-upload retry it on
+                // every reconnect.
+                let image_source = uploaded.and(image);
                 // Fit the body to the card once, here, rather than per frame:
-                // the column it wraps into depends on whether a thumbnail
-                // pushed the text right, which is settled by now.
+                // the column it wraps into depends on whether an image pushed
+                // the text right, which is settled by now.
                 let family = cce_ui::layout::statusbar_font_parsed().0;
-                let body = fit_body(&body, body_wrap_width(image.is_some()), Some(&family));
+                let image_box = image_source.as_ref().map(ImageSource::box_w);
+                let body = fit_body(&body, body_wrap_width(image_box), Some(&family));
+                let has_default = actions.iter().any(|(k, _)| k == "default");
+                let buttons = actions
+                    .into_iter()
+                    .filter(|(k, _)| k != "default")
+                    .take(MAX_ACTIONS)
+                    .map(|(k, label)| (k, action_label(&label)))
+                    .collect();
                 let fresh = Notification {
                     id,
                     app_name,
                     summary,
                     body,
-                    // Only a path that actually produced a texture: an
-                    // unreadable one must not make the re-upload retry it on
-                    // every reconnect.
-                    image_path: image.is_some().then_some(image_path).flatten(),
-                    image,
+                    image: uploaded,
+                    image_source,
+                    has_default,
+                    actions: buttons,
+                    hovered_action: None,
                     duration,
                     expires_at: None,
                 };
@@ -510,6 +693,7 @@ impl Application for NotifierApp {
             UserEvent::CloseNotification { id } => {
                 if let Some(i) = self.stack.iter().position(|n| n.id == id) {
                     self.stack.remove(i).free_image();
+                    self.signal(Signal::Closed(id, CLOSED_BY_CALL));
                     *needs_rebuild = true;
                 }
             }
@@ -522,14 +706,17 @@ impl Application for NotifierApp {
         let now = std::time::Instant::now();
         let visible = self.visible_count();
         for n in &mut self.stack[..visible] {
-            let deadline = now + std::time::Duration::from_secs_f32(n.duration);
-            n.expires_at.get_or_insert(deadline);
+            if let (Some(secs), None) = (n.duration, n.expires_at) {
+                n.expires_at = Some(now + std::time::Duration::from_secs_f32(secs));
+            }
         }
         let before = self.stack.len();
         let mut i = 0;
         while i < self.stack.len() {
             if self.stack[i].expires_at.is_some_and(|t| now >= t) {
-                self.stack.remove(i).free_image();
+                let mut card = self.stack.remove(i);
+                self.signal(Signal::Closed(card.id, CLOSED_EXPIRED));
+                card.free_image();
             } else {
                 i += 1;
             }
@@ -588,11 +775,13 @@ impl Application for NotifierApp {
             return None;
         }
         let now = std::time::Instant::now();
+        // A sticky card (no duration) has nothing to wait for; one not yet
+        // stamped is due now, so `tick` stamps it.
         let soonest = self.stack[..self.visible_count()]
             .iter()
+            .filter(|n| n.duration.is_some())
             .map(|n| n.expires_at.map_or(std::time::Duration::ZERO, |t| t.saturating_duration_since(now)))
-            .min()
-            .unwrap_or(std::time::Duration::ZERO);
+            .min()?;
         Some(soonest.max(std::time::Duration::from_millis(10)))
     }
 
@@ -647,6 +836,8 @@ impl Application for NotifierApp {
         // Run the org.freedesktop.Notifications D-Bus server on a background
         // thread; incoming Notify calls are forwarded to update() via the channel.
         let sender = self.sender.clone();
+        let (signals, mut outbox) = tokio::sync::mpsc::unbounded_channel::<Signal>();
+        self.signals = Some(signals);
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -665,8 +856,22 @@ impl Application for NotifierApp {
                     .and_then(|b| b.serve_at("/org/freedesktop/Notifications", dbus_impl))
                 {
                     Ok(builder) => match builder.build().await {
-                        Ok(_conn) => {
+                        Ok(conn) => {
                             log::info!("cce-notifier: D-Bus listener registered.");
+                            // The UI's clicks and expiries, as the spec's signals.
+                            let Ok(emitter) = zbus::object_server::SignalEmitter::new(&conn, "/org/freedesktop/Notifications") else {
+                                std::future::pending::<()>().await;
+                                return;
+                            };
+                            while let Some(signal) = outbox.recv().await {
+                                let sent = match &signal {
+                                    Signal::ActionInvoked(id, key) => DbusInterface::action_invoked(&emitter, *id, key).await,
+                                    Signal::Closed(id, reason) => DbusInterface::notification_closed(&emitter, *id, *reason).await,
+                                };
+                                if let Err(e) = sent {
+                                    log::warn!("cce-notifier: emitting {signal:?}: {e}");
+                                }
+                            }
                             std::future::pending::<()>().await;
                         }
                         Err(e) => log::error!("cce-notifier: failed to build D-Bus connection: {e}"),
@@ -677,15 +882,51 @@ impl Application for NotifierApp {
         });
     }
 
-    // Notifications are non-interactive.
-    fn handle_pointer_move(&mut self, _pos: LogicalPosition, _needs_rebuild: &mut bool) {}
+    /// The hover wash on a card's buttons.
+    fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
+        let (x, y) = (pos.x as f32, pos.y as f32);
+        let card = self.card_at(y);
+        for (i, n) in self.stack.iter_mut().take(MAX_VISIBLE).enumerate() {
+            let hit = (card == Some(i))
+                .then(|| n.action_rects(Notification::top(i)).iter().position(|(r, _)| r.contains(x, y)))
+                .flatten();
+            if n.hovered_action != hit {
+                n.hovered_action = hit;
+                *needs_rebuild = true;
+            }
+        }
+    }
+
+    /// A click takes a card down. On a button it answers that action; on the
+    /// card it answers `default` when the client offered one, else it is a
+    /// plain dismissal. A right click only dismisses.
     fn handle_mouse_input(
         &mut self,
-        _button: MouseButton,
-        _state: ElementState,
-        _pos: LogicalPosition,
-        _needs_rebuild: &mut bool,
+        button: MouseButton,
+        state: ElementState,
+        pos: LogicalPosition,
+        needs_rebuild: &mut bool,
     ) -> Option<Self::Message> {
+        if state != ElementState::Released {
+            return None;
+        }
+        let (x, y) = (pos.x as f32, pos.y as f32);
+        let i = self.card_at(y)?;
+        let action = match button {
+            MouseButton::Left => {
+                let card = &self.stack[i];
+                let on_button = card
+                    .action_rects(Notification::top(i))
+                    .iter()
+                    .position(|(r, _)| r.contains(x, y))
+                    .map(|b| card.actions[b].0.clone());
+                on_button.or_else(|| card.has_default.then(|| "default".to_string()))
+            }
+            MouseButton::Right => None,
+            _ => return None,
+        };
+        self.take_down(i, action);
+        *needs_rebuild = true;
         None
     }
     fn handle_mouse_wheel(&mut self, _delta: &MouseScrollDelta, _pos: LogicalPosition, _needs_rebuild: &mut bool) {}
@@ -707,7 +948,7 @@ struct DbusInterface {
 #[interface(name = "org.freedesktop.Notifications")]
 impl DbusInterface {
     async fn get_capabilities(&self) -> Vec<String> {
-        vec!["body".to_string(), "actions".to_string(), "icon-static".to_string()]
+        vec!["body".to_string(), "actions".to_string(), "icon-static".to_string(), "persistence".to_string()]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -718,7 +959,7 @@ impl DbusInterface {
         app_icon: String,
         summary: String,
         body: String,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         hints: HashMap<String, Value<'_>>,
         expire_timeout: i32,
     ) -> u32 {
@@ -732,14 +973,14 @@ impl DbusInterface {
         } else {
             self.next_id.fetch_add(1, Ordering::Relaxed)
         };
-        // `expire_timeout` is ms; -1 means "server decides". 0 means "never
-        // expire" in the spec, but these cards cannot be clicked away, so it
-        // is treated as the default rather than pinning a slot forever.
-        let duration = match expire_timeout {
-            ms if ms > 0 => ms as f32 / 1000.0,
-            _ => read_duration(),
-        }
-        .max(1.0);
+        // `expire_timeout` is ms; -1 means "server decides", 0 "never". A
+        // critical notification left to the server also stays: a card can be
+        // clicked away now, so neither pins a slot for good.
+        let urgency = match hints.get("urgency") {
+            Some(Value::U8(u)) => *u,
+            _ => 1,
+        };
+        let duration = resolve_duration(expire_timeout, urgency, read_duration());
         // Preview image: the standard `image-path` hint (spec 1.2; `image_path`
         // is the 1.1 spelling), else an absolute-path app_icon.
         let hint_str = |key: &str| -> Option<String> {
@@ -748,15 +989,14 @@ impl DbusInterface {
                 _ => None,
             }
         };
-        let image_path = hint_str("image-path")
-            .or_else(|| hint_str("image_path"))
-            .or_else(|| app_icon.starts_with('/').then(|| app_icon.clone()));
+        let image = image_source(hint_str("image-path").or_else(|| hint_str("image_path")), &app_icon);
         let _ = self.sender.send(UserEvent::NewNotification {
             id,
             app_name,
             summary,
             body,
-            image_path,
+            image,
+            actions: action_pairs(&actions),
             duration,
         });
         id
@@ -766,6 +1006,12 @@ impl DbusInterface {
         let _ = self.sender.send(UserEvent::CloseNotification { id });
     }
 
+    #[zbus(signal)]
+    async fn action_invoked(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, action_key: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn notification_closed(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, reason: u32) -> zbus::Result<()>;
+
     async fn get_server_information(&self) -> (String, String, String, String) {
         (
             "cce-notifier".to_string(),
@@ -773,6 +1019,35 @@ impl DbusInterface {
             "0.1.0".to_string(),
             "1.2".to_string(),
         )
+    }
+}
+
+/// `actions` is a flat `[key, label, key, label, …]` list; an odd tail is
+/// dropped.
+fn action_pairs(actions: &[String]) -> Vec<(String, String)> {
+    actions.chunks_exact(2).map(|kv| (kv[0].clone(), kv[1].clone())).collect()
+}
+
+/// Seconds on screen, or `None` to stay until clicked: `expire_timeout`
+/// (ms; 0 never, -1 the server's choice) first, then urgency 2 (critical)
+/// keeps a server's-choice card up.
+fn resolve_duration(expire_timeout: i32, urgency: u8, default_secs: f32) -> Option<f32> {
+    match expire_timeout {
+        ms if ms > 0 => Some((ms as f32 / 1000.0).max(1.0)),
+        0 => None,
+        _ if urgency >= 2 => None,
+        _ => Some(default_secs.max(1.0)),
+    }
+}
+
+/// The card's image: a preview file wins (screenshots carry one), else the
+/// `app_icon` — a theme name or a path, which `cce_ui::icon` resolves either
+/// way. An `app_icon` path to a PNG used to be the only icon shown.
+fn image_source(image_path: Option<String>, app_icon: &str) -> Option<ImageSource> {
+    match image_path {
+        Some(path) if !path.is_empty() => Some(ImageSource::Thumbnail(path.trim_start_matches("file://").to_string())),
+        _ if !app_icon.is_empty() => Some(ImageSource::Icon(app_icon.trim_start_matches("file://").to_string())),
+        _ => None,
     }
 }
 
@@ -801,6 +1076,43 @@ mod tests {
             line_height * (BODY_LINES + 1) as f32 > box_height,
             "another line fits in {box_height} — BODY_LINES is too small"
         );
+    }
+
+    #[test]
+    fn actions_pair_up_and_default_is_the_card() {
+        let raw: Vec<String> = ["default", "Open", "reply", "Reply", "dangling"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            action_pairs(&raw),
+            [("default".to_string(), "Open".to_string()), ("reply".to_string(), "Reply".to_string())]
+        );
+    }
+
+    #[test]
+    fn durations_honor_timeout_then_urgency() {
+        assert_eq!(resolve_duration(3000, 1, 5.0), Some(3.0));
+        assert_eq!(resolve_duration(200, 1, 5.0), Some(1.0), "floored at a second");
+        assert_eq!(resolve_duration(0, 1, 5.0), None, "0 never expires");
+        assert_eq!(resolve_duration(-1, 2, 5.0), None, "critical stays");
+        assert_eq!(resolve_duration(4000, 2, 5.0), Some(4.0), "an explicit timeout wins");
+        assert_eq!(resolve_duration(-1, 1, 5.0), Some(5.0));
+    }
+
+    #[test]
+    fn image_source_prefers_the_preview_then_the_icon() {
+        assert_eq!(image_source(Some("/tmp/shot.png".into()), "firefox"), Some(ImageSource::Thumbnail("/tmp/shot.png".into())));
+        assert_eq!(image_source(None, "firefox"), Some(ImageSource::Icon("firefox".into())));
+        assert_eq!(image_source(Some(String::new()), "file:///x/a.svg"), Some(ImageSource::Icon("/x/a.svg".into())));
+        assert_eq!(image_source(None, ""), None);
+    }
+
+    #[test]
+    fn buttons_right_align_inside_the_padding() {
+        let row = action_layout(&[30.0, 40.0]);
+        let (last_x, last_w) = row[1];
+        assert!((last_x + last_w - (NOTIF_WIDTH as f32 - CARD_PAD)).abs() < 0.01);
+        assert!((row[1].0 - (row[0].0 + row[0].1) - ACTION_GAP).abs() < 0.01);
+        assert_eq!(action_label("Mark as read and archive"), "Mark as read…");
+        assert_eq!(action_label("Reply"), "Reply");
     }
 
     /// A full stack has to land exactly on the surface the layer shell was
