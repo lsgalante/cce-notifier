@@ -538,10 +538,6 @@ struct NotifierApp {
     /// process's own, any later one is a replacement after a reconnect. See
     /// `renderer_init`.
     seen_renderer: bool,
-    /// The runner dropped the surface and renderer because the stack emptied
-    /// (`surface_hidden`), so every thumbnail uploaded since is queued for the
-    /// renderer that comes next — `renderer_init` must not re-upload it.
-    hidden_since_renderer: bool,
     /// Live notifications, oldest first. The first `MAX_VISIBLE` are drawn top-down
     /// (so a new one appears below the ones already being read, and cards below an
     /// expiring one slide up); the rest wait their turn.
@@ -609,7 +605,6 @@ impl Application for NotifierApp {
         let sender: calloop::channel::Sender<Self::Message> = sender.into();
         Self {
             seen_renderer: false,
-            hidden_since_renderer: false,
             stack: Vec::new(),
             plate: read_plate_style(),
             sender,
@@ -750,12 +745,6 @@ impl Application for NotifierApp {
         if !std::mem::replace(&mut self.seen_renderer, true) {
             return;
         }
-        // Mapped again after an empty spell: the cards on the stack arrived
-        // after the old renderer was dropped, and their uploads are already
-        // queued for this one.
-        if std::mem::replace(&mut self.hidden_since_renderer, false) {
-            return;
-        }
         let with_images = self.stack.iter().filter(|n| n.image.is_some()).count();
         if with_images > 0 {
             log::info!("[notifier] renderer replaced; re-uploading {with_images} card thumbnail(s)");
@@ -789,12 +778,11 @@ impl Application for NotifierApp {
     /// Mapped only while a card is up: an empty, transparent overlay still
     /// made the compositor blur behind it whenever anything under the corner
     /// changed, and kept fullscreen clients off direct scanout.
+    /// The runner keeps its renderer across the gap and moves it onto the
+    /// next surface, so thumbnail ids stay good and `renderer_init` does not
+    /// run for it.
     fn wants_surface(&self) -> bool {
         !self.stack.is_empty()
-    }
-
-    fn surface_hidden(&mut self) {
-        self.hidden_since_renderer = true;
     }
 
     /// The whole frame as one display list (Phase 6): the plate plus the three
