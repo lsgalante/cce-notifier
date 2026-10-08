@@ -401,7 +401,7 @@ dependencies = [
 [[package]]
 name = "cce-core"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-core.git?rev=de8a6ff818874b38f3958b0bd562377390e7af34#de8a6ff818874b38f3958b0bd562377390e7af34"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=0fb7c440d040259547aae1d711423f533ed52210#0fb7c440d040259547aae1d711423f533ed52210"
 dependencies = [
  "kdl",
  "libc",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=f37e833303fb0439149b91048fd4a820639e0333#f37e833303fb0439149b91048fd4a820639e0333"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=b56b4d1d73c315a805cf44c16e9e3169bdbfca04#b56b4d1d73c315a805cf44c16e9e3169bdbfca04"
 dependencies = [
  "ash",
  "bitflags 2.13.1",
