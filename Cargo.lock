@@ -399,6 +399,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cce-core"
+version = "0.1.0"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=de8a6ff818874b38f3958b0bd562377390e7af34#de8a6ff818874b38f3958b0bd562377390e7af34"
+dependencies = [
+ "kdl",
+ "libc",
+ "log",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
 name = "cce-notifier"
 version = "0.1.0"
 dependencies = [
@@ -415,13 +427,14 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=4dcb970d84f0a6aeeef5311ac1d4cacb0c63a803#4dcb970d84f0a6aeeef5311ac1d4cacb0c63a803"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=958aa7500132c49ae1b3d07d39e4d9bf0db3ff7a#958aa7500132c49ae1b3d07d39e4d9bf0db3ff7a"
 dependencies = [
  "ash",
  "bitflags 2.13.1",
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
+ "cce-core",
  "cosmic-text",
  "cursor-icon",
  "dispatch2",
