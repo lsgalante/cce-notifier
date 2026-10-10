@@ -225,10 +225,18 @@ fn play_bell_if_configured() {
     };
     if let Some(event) = sound_event {
         log::info!("Playing notification sound ({})...", sound_type);
-        let _ = std::process::Command::new("canberra-gtk-play")
-            .arg("-i")
-            .arg(event)
-            .spawn();
+        // Reap the player on a thread of its own: this runs on the UI thread,
+        // which must not block for the length of the sound. Until 2026-10-10
+        // the Child was dropped unwaited, leaving a `canberra-gtk-play
+        // <defunct>` zombie under the notifier for every sound played.
+        match std::process::Command::new("canberra-gtk-play").arg("-i").arg(event).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => log::warn!("Failed to play notification sound: {}", e),
+        }
     }
 }
 
