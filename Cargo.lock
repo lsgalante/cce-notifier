@@ -438,7 +438,7 @@ dependencies = [
 [[package]]
 name = "cce-ui"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-ui.git?rev=87946f19f68852c78339ba5f852cda02b56b68a6#87946f19f68852c78339ba5f852cda02b56b68a6"
+source = "git+https://github.com/lsgalante/cce-ui.git?rev=9b5bcb0da3052faef7cce9222471cdb9f06e7f36#9b5bcb0da3052faef7cce9222471cdb9f06e7f36"
 dependencies = [
  "accesskit",
  "ash",
@@ -447,6 +447,7 @@ dependencies = [
  "calloop",
  "calloop-wayland-source",
  "cce-core",
+ "chrono",
  "cosmic-text",
  "cursor-icon",
  "dispatch2",
@@ -491,6 +492,15 @@ name = "cfg_aliases"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "codespan-reporting"
