@@ -253,13 +253,17 @@ fn load_thumbnail(path: &str) -> Option<(Vec<u8>, u32, u32)> {
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => buf[..w * h * 4].to_vec(),
         png::ColorType::Rgb => buf[..w * h * 3]
-            .chunks_exact(3)
-            .flat_map(|px| [px[0], px[1], px[2], 255])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
             .collect(),
         png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::GrayscaleAlpha => buf[..w * h * 2]
-            .chunks_exact(2)
-            .flat_map(|px| [px[0], px[0], px[0], px[1]])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[g, a]| [g, g, g, a])
             .collect(),
         _ => return None,
     };
@@ -893,7 +897,7 @@ impl Application for NotifierApp {
 
     /// The hover wash on a card's buttons.
     fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
-        let (x, y) = (pos.x as f32, pos.y as f32);
+        let (x, y) = (pos.x, pos.y);
         let card = self.card_at(y);
         for (i, n) in self.stack.iter_mut().take(MAX_VISIBLE).enumerate() {
             let hit = (card == Some(i))
@@ -919,7 +923,7 @@ impl Application for NotifierApp {
         if state != ElementState::Released {
             return None;
         }
-        let (x, y) = (pos.x as f32, pos.y as f32);
+        let (x, y) = (pos.x, pos.y);
         let i = self.card_at(y)?;
         let action = match button {
             MouseButton::Left => {
@@ -1034,7 +1038,7 @@ impl DbusInterface {
 /// `actions` is a flat `[key, label, key, label, …]` list; an odd tail is
 /// dropped.
 fn action_pairs(actions: &[String]) -> Vec<(String, String)> {
-    actions.chunks_exact(2).map(|kv| (kv[0].clone(), kv[1].clone())).collect()
+    actions.as_chunks::<2>().0.iter().map(|[key, label]| (key.clone(), label.clone())).collect()
 }
 
 /// Seconds on screen, or `None` to stay until clicked: `expire_timeout`
