@@ -841,12 +841,24 @@ impl Application for NotifierApp {
                     next_id: std::sync::atomic::AtomicU32::new(1),
                 };
                 match connection::Builder::session()
-                    .and_then(|b| b.name("org.freedesktop.Notifications"))
                     .and_then(|b| b.serve_at("/org/freedesktop/Notifications", dbus_impl))
                 {
                     Ok(builder) => match builder.build().await {
                         Ok(conn) => {
-                            log::info!("cce-notifier: D-Bus listener registered.");
+                            // Not `Builder::name`: zbus's default flags carry
+                            // DoNotQueue, so any peer that replaced us (a test
+                            // run of another daemon) left the name unowned on
+                            // exit and every notification was dropped until we
+                            // restarted. Queued, we get the name back.
+                            use zbus::fdo::{RequestNameFlags, RequestNameReply};
+                            let flags = RequestNameFlags::AllowReplacement | RequestNameFlags::ReplaceExisting;
+                            match conn.request_name_with_flags("org.freedesktop.Notifications", flags).await {
+                                Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
+                                    log::info!("cce-notifier: D-Bus listener registered.")
+                                }
+                                Ok(reply) => log::warn!("cce-notifier: org.freedesktop.Notifications is held by another daemon ({reply:?}); queued for it"),
+                                Err(e) => log::error!("cce-notifier: failed to request D-Bus name: {e}"),
+                            }
                             // The UI's clicks and expiries, as the spec's signals.
                             let Ok(emitter) = zbus::object_server::SignalEmitter::new(&conn, "/org/freedesktop/Notifications") else {
                                 std::future::pending::<()>().await;
