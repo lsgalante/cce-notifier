@@ -195,22 +195,22 @@ fn read_plate_style() -> PlateStyle {
             .and_then(cce_ui::color::parse_hex_rgba_linear)
     };
     let fill = linear("color")
-        .or_else(cce_ui::colors::plate_color)
+        .or_else(cce_ui::color::plate_color)
         .unwrap_or([
-            cce_ui::colors::srgb_to_linear(0.08),
-            cce_ui::colors::srgb_to_linear(0.08),
-            cce_ui::colors::srgb_to_linear(0.12),
+            cce_ui::color::srgb_to_linear(0.08),
+            cce_ui::color::srgb_to_linear(0.08),
+            cce_ui::color::srgb_to_linear(0.12),
             1.0,
         ]);
     let border = linear("border_color")
-        .or_else(cce_ui::colors::plate_border_color)
-        .map(|c| (c, f32_key("border_thickness", cce_ui::colors::plate_border_thickness())))
+        .or_else(cce_ui::color::plate_border_color)
+        .map(|c| (c, f32_key("border_thickness", cce_ui::color::plate_border_thickness())))
         .filter(|&(_, t)| t > 0.0);
     PlateStyle {
         fill,
         border,
         radius: f32_key("corner_radius", cce_ui::layout::plate_corner_radius()),
-        blur: key("blur").and_then(|v| v.as_bool()).unwrap_or_else(cce_ui::colors::plate_blur),
+        blur: key("blur").and_then(|v| v.as_bool()).unwrap_or_else(cce_ui::color::plate_blur),
         opacity: f32_key("opacity", cce_ui::layout::plate_opacity()),
     }
 }
@@ -350,7 +350,7 @@ fn fit_body(body: &str, wrap_w: f32, font: Option<&str>) -> String {
 }
 
 fn srgb_u8(linear: [f32; 4]) -> [u8; 3] {
-    let srgb = cce_ui::colors::to_srgb(linear);
+    let srgb = cce_ui::color::to_srgb(linear);
     [
         (srgb[0] * 255.0) as u8,
         (srgb[1] * 255.0) as u8,
@@ -410,7 +410,7 @@ fn draw_card(
     // of the first one.
     let buttons = notification.action_rects(top);
     let name_right = buttons.first().map_or(text_x + text_w, |(r, _)| r.x - ACTION_GAP);
-    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::colors::TEXT_DIM), font.clone(), Some([text_x, top + 8.0, name_right, top + BODY_TOP]));
+    pc.text_with(&notification.app_name, text_x, top + 12.0, 10.0, srgb_u8(cce_ui::color::TEXT_DIM), font.clone(), Some([text_x, top + 8.0, name_right, top + BODY_TOP]));
     for (i, (rect, label)) in buttons.iter().enumerate() {
         let hovered = notification.hovered_action == Some(i);
         let wash = if hovered { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] };
@@ -420,12 +420,12 @@ fn draw_card(
             rect.x + ACTION_PAD_X,
             rect.y + (ACTION_H - ACTION_FONT) / 2.0 - 1.0,
             ACTION_FONT,
-            srgb_u8(cce_ui::colors::TEXT_FG),
+            srgb_u8(cce_ui::color::TEXT_FG),
             font.clone(),
             Some([rect.x, rect.y, rect.x + rect.width, rect.y + rect.height]),
         );
     }
-    pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::colors::TEXT_HEADER), font.clone(), column(24.0, BODY_TOP));
+    pc.text_with(&notification.summary, text_x, top + 28.0, 13.0, srgb_u8(cce_ui::color::TEXT_HEADER), font.clone(), column(24.0, BODY_TOP));
     // The body word-wraps within that column instead of running off the card.
     // `box_height` is what bounds it: the engine lays boxed text out at a 1.4
     // line height, so this admits BODY_LINES 11px lines (46.2 of 48) and shapes
@@ -437,7 +437,7 @@ fn draw_card(
         text_x,
         top + BODY_TOP,
         BODY_SIZE,
-        srgb_u8(cce_ui::colors::TEXT_FG),
+        srgb_u8(cce_ui::color::TEXT_FG),
         font,
         column(BODY_TOP, card_h - CARD_PAD_B),
         cce_ui::scene::paint::TextAttrs::default(),
