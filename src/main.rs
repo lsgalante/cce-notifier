@@ -602,6 +602,10 @@ impl NotifierApp {
 impl Application for NotifierApp {
     type Message = UserEvent;
 
+    fn layer_app(&mut self) -> Option<&mut dyn cce_ui::engine::LayerApp> {
+        Some(self)
+    }
+
     /// A systemd user service the compositor does not restore: it waits for
     /// the next compositor rather than exiting, so org.freedesktop.Notifications
     /// stays owned across a logout or a compositor restart.
@@ -630,22 +634,6 @@ impl Application for NotifierApp {
             fullscreen: false,
             min_size: None,
         }
-    }
-
-    fn layer(&self) -> Option<LayerSettings> {
-        // Sit below the status modules with one bar-spacing of gap, right edge aligned
-        // with the rightmost top-right module (the clock): the compositor lays the bar
-        // out at y=0, height `layout.bar_height`, flush to `output_width - MARGIN`
-        // with SPACING between segments (cce-window-manager arrange.rs, both 12).
-        let bar_h = cce_ui::config::get_i64("/layout/bar_height", 24) as i32;
-        Some(LayerSettings {
-            layer: LayerKind::Overlay,
-            anchor: LayerAnchor::TOP | LayerAnchor::RIGHT,
-            exclusive_zone: 0,
-            keyboard_interactivity: LayerKeyboardInteractivity::None,
-            margin: (bar_h + 12, 12, 0, 0),
-            namespace: "cce-notifier".to_string(),
-        })
     }
 
     fn update(&mut self, msg: Self::Message, needs_rebuild: &mut bool, _exit: &mut bool) {
@@ -782,16 +770,6 @@ impl Application for NotifierApp {
             .map(|n| n.expires_at.map_or(std::time::Duration::ZERO, |t| t.saturating_duration_since(now)))
             .min()?;
         Some(soonest.max(std::time::Duration::from_millis(10)))
-    }
-
-    /// Mapped only while a card is up: an empty, transparent overlay still
-    /// made the compositor blur behind it whenever anything under the corner
-    /// changed, and kept fullscreen clients off direct scanout.
-    /// The runner keeps its renderer across the gap and moves it onto the
-    /// next surface, so thumbnail ids stay good and `renderer_init` does not
-    /// run for it.
-    fn wants_surface(&self) -> bool {
-        !self.stack.is_empty()
     }
 
     /// The whole frame as one display list (Phase 6): the plate plus the three
@@ -942,6 +920,34 @@ impl Application for NotifierApp {
     fn handle_mouse_wheel(&mut self, _delta: &MouseScrollDelta, _pos: LogicalPosition, _needs_rebuild: &mut bool) {}
     fn handle_key_input(&mut self, _event: &KeyEvent, _needs_rebuild: &mut bool) -> Option<Self::Message> {
         None
+    }
+}
+
+impl cce_ui::engine::LayerApp for NotifierApp {
+    fn layer(&self) -> Option<LayerSettings> {
+        // Sit below the status modules with one bar-spacing of gap, right edge aligned
+        // with the rightmost top-right module (the clock): the compositor lays the bar
+        // out at y=0, height `layout.bar_height`, flush to `output_width - MARGIN`
+        // with SPACING between segments (cce-window-manager arrange.rs, both 12).
+        let bar_h = cce_ui::config::get_i64("/layout/bar_height", 24) as i32;
+        Some(LayerSettings {
+            layer: LayerKind::Overlay,
+            anchor: LayerAnchor::TOP | LayerAnchor::RIGHT,
+            exclusive_zone: 0,
+            keyboard_interactivity: LayerKeyboardInteractivity::None,
+            margin: (bar_h + 12, 12, 0, 0),
+            namespace: "cce-notifier".to_string(),
+        })
+    }
+
+    /// Mapped only while a card is up: an empty, transparent overlay still
+    /// made the compositor blur behind it whenever anything under the corner
+    /// changed, and kept fullscreen clients off direct scanout.
+    /// The runner keeps its renderer across the gap and moves it onto the
+    /// next surface, so thumbnail ids stay good and `renderer_init` does not
+    /// run for it.
+    fn wants_surface(&self) -> bool {
+        !self.stack.is_empty()
     }
 }
 
